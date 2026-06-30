@@ -1,12 +1,11 @@
 name: Release
 
-# Build the polyglotmesh binary on every push to a tag matching v*.*.* and
-# upload the resulting tarball as a release artifact.
+# Build the polyglotmesh binary on every push to a tag matching v*.*.*
+# and attach the resulting tarball to a fresh GitHub release.
 #
-# Only builds for x86_64-unknown-linux-gnu (which is the rust toolchain's
-# default target on the ubuntu-latest runner). For macOS / Windows binaries,
-# add a self-hosted runner or use the cross-rs action — for now we focus on
-# the most common case (Linux servers).
+# Single-job workflow (no cross-job artifact passing) — simpler and
+# avoids the v4 download-artifact / softprops-action-gh-release file
+# path gotcha.
 
 on:
   push:
@@ -18,9 +17,10 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build binary (linux x86_64)
+  release:
+    name: Build + release
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -37,28 +37,18 @@ jobs:
         run: cargo build --release --bin polyglotmesh
       - name: Package
         run: |
-          mkdir -p dist
+          mkdir -p release-artifacts
           cd target/release
-          tar -cJf ../../dist/polyglotmesh-x86_64-unknown-linux-gnu.tar.xz polyglotmesh
-          sha256sum ../../dist/polyglotmesh-x86_64-unknown-linux-gnu.tar.xz | tee ../../dist/SHA256SUMS
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: polyglotmesh-x86_64-unknown-linux-gnu
-          path: dist/*
-          if-no-files-found: error
-
-  release:
-    name: Create GitHub release
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-      - name: Create release
+          tar -cJf ../../release-artifacts/polyglotmesh-x86_64-unknown-linux-gnu.tar.xz polyglotmesh
+          cd ../../release-artifacts
+          sha256sum polyglotmesh-x86_64-unknown-linux-gnu.tar.xz > SHA256SUMS
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          name: polyglotmesh ${{ github.ref_name }}
+          body: ${{ github.event.release.body || 'See CHANGELOG.md for details.' }}
+          files: |
+            release-artifacts/polyglotmesh-x86_64-unknown-linux-gnu.tar.xz
+            release-artifacts/SHA256SUMS
           generate_release_notes: true
+          fail_on_unmatched_files: true
