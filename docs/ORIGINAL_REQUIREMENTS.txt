@@ -1,0 +1,19 @@
+# Original requirements (kept for reference, not part of user-facing docs)
+
+This file is the original brief that started the project. It's preserved
+here for historical context only — the user-facing documentation lives in
+`README.md`, `docs/FEATURES.md`, `docs/ARCHITECTURE.md`, and
+`docs/FUTURE_IMPROVEMENTS.md`.
+
+---
+
+Create a rust based ai llm router which accepts openai compatible or
+anthropic compatible api routes.
+
+SO, example, I may add 3-4 openai compatible api base url and api keys.
+Similarly, I may add 3-4 anthropic compatible api base url and api keys.
+So, finally this rust based router will have a fast queue based system
+and exposes single openai and anthropic based baseurl and self created
+api key.
+
+SO, idea is like litellm or bitefrost but rust based and superfast.

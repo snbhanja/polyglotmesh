@@ -1,0 +1,14 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# Shell scripts (always LF, executable)
+*.sh text eol=lf
+
+# Rust source
+*.rs text eol=lf
+
+# TOML config
+*.toml text eol=lf

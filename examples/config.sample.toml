@@ -1,0 +1,185 @@
+# ---------------------------------------------------------------------------
+# polyglotmesh configuration
+# ---------------------------------------------------------------------------
+# This file lives at $POLYGLOTMESH_HOME/config.toml (default: ~/.polyglotmesh/config.toml).
+# Run `polyglotmesh where` to print the path on your machine.
+# Run `polyglotmesh show` to print the *active* (merged) version.
+#
+# Field reference mirrors the LiteLLM proxy config.yaml schema for the parts
+# most teams use: per-key limits, per-deployment credentials, model aliases,
+# routing, and queue / health-check tuning.
+# ---------------------------------------------------------------------------
+
+[server]
+# HTTP bind address for the proxy + admin API.
+bind = "0.0.0.0:8080"
+# Optional global cap on in-flight requests across every key.
+# global_max_parallel_requests = 200
+# Reject request bodies larger than this (MB).
+# max_request_size_mb = 64
+
+# ---------------------------------------------------------------------------
+# Self-issued API keys
+# ---------------------------------------------------------------------------
+# Each [[api_keys]] entry is one virtual key. You can put raw tokens (the
+# router will hash them at startup) or use the `key` subcommand to generate
+# a fresh one. Every limit field is optional; 0 / None = unlimited.
+#
+# Per-key fields (LiteLLM parity):
+#   key                       raw token (hashed in memory)
+#   key_alias                 friendly label
+#   role                      "api" (default) or "admin"
+#   models                    list of model names this key is allowed to call
+#   allowed_providers         ["openai","anthropic"] — empty = both
+#   rpm_limit                 requests per minute
+#   tpm_limit                 tokens per minute
+#   max_parallel_requests     concurrent cap for this key
+#   max_budget                USD budget (0 = unlimited)
+#   soft_budget               USD — request throttled (not blocked) when crossed
+#   budget_duration           "30s" "5m" "1h" "1d" "7d" "30d" "1w" "1mo"
+#   expires                   ISO 8601 timestamp or relative ("7d")
+#   allowed_model_region      region tag the deployment must carry
+#   blocked                   bool
+
+[[api_keys]]
+key = "pgm-replace-me-with-`polyglotmesh key`-output"
+key_alias = "dev-key"
+rpm_limit = 60
+tpm_limit = 200000
+max_budget = 5.0
+budget_duration = "1d"
+expires = "30d"
+models = ["gpt-4o-mini", "claude-3-5-sonnet-20241022"]
+
+# A second key with admin powers, used to call /v1/admin/*.
+[[api_keys]]
+key = "pgm-admin-replace-me"
+key_alias = "ops"
+role = "admin"
+rpm_limit = 0           # unlimited
+
+# Legacy bare-string keys still work (role=api, no limits).
+api_keys_legacy = []
+
+# ---------------------------------------------------------------------------
+# Upstream providers
+# ---------------------------------------------------------------------------
+# [[upstreams]] = one deployment. Add 3-4 of each kind for a real setup.
+# Per-upstream fields (LiteLLM litellm_params parity):
+#   id, kind, base_url, api_key
+#   priority               higher = preferred
+#   weight                 weighted-round-robin weight
+#   models                 ["gpt-4o-mini", ...] — empty = pass-through
+#   timeout_ms             per-request soft timeout
+#   max_concurrency        0 = unlimited
+#   rate_limit_rpm         per-upstream request rate cap
+#   rate_limit_tpm         per-upstream token rate cap
+#   max_budget             USD budget for this deployment
+#   budget_duration        reset window for the budget
+#   region                 tag for region pinning
+#   tags                   tag-based routing labels
+#   enabled                bool
+
+[[upstreams]]
+id = "openai-primary"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-..."
+priority = 30
+weight = 3
+models = ["gpt-4o-mini", "gpt-4o"]
+timeout_ms = 60000
+max_concurrency = 50
+rate_limit_rpm = 500
+rate_limit_tpm = 200000
+region = "us"
+tags = ["prod", "fast"]
+max_budget = 100.0
+budget_duration = "1d"
+
+[[upstreams]]
+id = "openai-fallback"
+kind = "openai"
+base_url = "https://api.openrouter.ai/v1"
+api_key = "sk-or-..."
+priority = 10
+models = ["gpt-4o-mini"]
+region = "us"
+tags = ["fallback"]
+
+[[upstreams]]
+id = "openai-vllm"
+kind = "openai"
+base_url = "http://gpu-box.local:8000/v1"
+api_key = "EMPTY"
+priority = 5
+weight = 5
+models = ["gpt-4o-mini"]
+region = "self-hosted"
+tags = ["local"]
+
+[[upstreams]]
+id = "anthropic-primary"
+kind = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "sk-ant-..."
+priority = 30
+models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+timeout_ms = 60000
+max_concurrency = 30
+rate_limit_rpm = 200
+region = "us"
+tags = ["prod"]
+
+[[upstreams]]
+id = "anthropic-bedrock"
+kind = "anthropic"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = "bedrock-key"
+priority = 15
+models = ["claude-3-5-sonnet-20241022"]
+region = "us-east-1"
+tags = ["bedrock"]
+
+# ---------------------------------------------------------------------------
+# model_list (LiteLLM-style top-level alias)
+# ---------------------------------------------------------------------------
+# A bare alias: { "model_name": <exposed>, "upstream_id": <id>, "upstream_model": <optional> }
+# This is the simplest way to expose "my-gpt-4o-mini" → upstream `openai-primary` model `gpt-4o-mini`.
+
+[[model_list]]
+model_name = "gpt4-mini"
+upstream_id = "openai-primary"
+
+[[model_list]]
+model_name = "claude-sonnet"
+upstream_id = "anthropic-primary"
+upstream_model = "claude-3-5-sonnet-20241022"
+
+# ---------------------------------------------------------------------------
+# model_aliases (multi-upstream alias, for failover / A-B)
+# ---------------------------------------------------------------------------
+# A logical model name can map to multiple (upstream_id, upstream_model) pairs;
+# the router tries them in the order listed.
+
+[model_aliases]
+"gpt-mini-fanout" = [
+  { upstream_id = "openai-primary", upstream_model = "gpt-4o-mini" },
+  { upstream_id = "openai-fallback", upstream_model = "gpt-4o-mini" },
+  { upstream_id = "openai-vllm", upstream_model = "gpt-4o-mini" },
+]
+
+# ---------------------------------------------------------------------------
+# Queue / health-check tuning (LiteLLM router_settings parity)
+# ---------------------------------------------------------------------------
+
+[queue]
+# Per-provider max in-flight + queued. 0 = unbounded.
+max_queue_per_provider = 0
+# How long a queued request waits before returning 503.
+queue_wait_timeout_ms = 30000
+# Background health probe interval (ms). 0 = disable.
+healthcheck_interval_ms = 15000
+healthcheck_timeout_ms = 5000
+# Consecutive failures before marking an upstream unhealthy.
+healthcheck_failure_threshold = 3

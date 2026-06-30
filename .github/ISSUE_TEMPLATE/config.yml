@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/polyglotmesh/polyglotmesh/discussions
+    about: Ask questions, share setups, propose ideas.
+  - name: Security
+    url: https://github.com/polyglotmesh/polyglotmesh/security
+    about: For security issues, please use the address in SECURITY.md.

@@ -1,0 +1,31 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local config / state (never commit user keys or DBs)
+config.toml
+state.db
+state.db-shm
+state.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local test scratch dirs
+/tmp/
+/ailr-*/
+/pgm-*/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db

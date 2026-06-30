@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>polyglotmesh dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root[data-theme=dark]{--bg:#0f1115;--panel:#171a21;--panel-2:#1e222b;--text:#e6e8eb;--muted:#8a93a3;--border:#2a2f3a;--accent:#5eafe6;--green:#5dd39e;--red:#e26464;--amber:#e0b04a}
+:root[data-theme=light]{--bg:#f6f7f9;--panel:#fff;--panel-2:#eef0f3;--text:#1a1d22;--muted:#6b7480;--border:#d6d9de;--accent:#2563eb;--green:#16a34a;--red:#dc2626;--amber:#d97706}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--text)}
+header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;background:var(--panel)}
+header h1{font-size:16px;font-weight:600;margin:0}
+header .meta{color:var(--muted);font-size:12px}
+header .spacer{flex:1}
+header button{background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+header button:hover{border-color:var(--accent)}
+header button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{padding:20px 24px;max-width:1400px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:14px 16px}
+.card .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card .value{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.card .sub{color:var(--muted);font-size:11px;margin-top:4px}
+.card.chart{padding:12px 14px 8px}
+.card.chart canvas{width:100%!important;height:110px!important}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:24px 0 10px;font-weight:600}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+th{background:var(--panel-2);font-weight:500;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+tr:last-child td{border-bottom:none}
+td.num{text-align:right}
+.empty{color:var(--muted);font-style:italic;padding:20px;text-align:center}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:6px}
+.status-dot.warn{background:var(--amber)}
+.status-dot.err{background:var(--red)}
+.upstream{padding:12px;border-bottom:1px solid var(--border)}
+.upstream:last-child{border-bottom:none}
+.upstream .name{display:flex;align-items:center;margin-bottom:6px}
+.upstream .name b{margin-right:8px}
+.upstream .name small{color:var(--muted);font-size:11px}
+.upstream .pill{background:var(--panel-2);border:1px solid var(--border);border-radius:12px;padding:2px 8px;font-size:11px;color:var(--muted);margin-left:6px}
+.pills{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.err-banner{background:var(--red);color:#fff;padding:8px 16px;text-align:center;font-size:13px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted)}
+.group-tabs{display:flex;gap:4px;margin-bottom:12px}
+.group-tabs button{background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+.group-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:500}
+.live-tail{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;max-height:180px;overflow-y:auto}
+.live-tail .line{padding:2px 0;border-bottom:1px solid var(--border)}
+.live-tail .line:last-child{border-bottom:none}
+.live-tail .line.err{color:var(--red)}
+.live-tail .ago{color:var(--muted);margin-right:8px}
+.chart-row{display:grid;grid-template-columns:2fr 1fr 1fr;gap:16px;margin-bottom:24px}
+</style>
+</head>
+<body>
+<header>
+  <h1>polyglotmesh</h1>
+  <span class="meta" id="meta">loading</span>
+  <span class="spacer"></span>
+  <span class="meta" id="refresh-meta">polling: 5s</span>
+  <button id="live-btn" onclick="toggleLive()" class="active">live: on</button>
+  <button id="theme-btn" onclick="toggleTheme()">theme: dark</button>
+  <button onclick="setRefresh(5)">5s</button>
+  <button onclick="setRefresh(15)">15s</button>
+  <button onclick="setRefresh(60)">60s</button>
+  <button onclick="refresh()">refresh</button>
+</header>
+<div id="err" style="display:none" class="err-banner"></div>
+<main>
+  <div class="grid" id="totals"></div>
+  <div class="chart-row">
+    <div class="card chart"><div class="label">RPS / TPS (last 1m)</div><canvas id="ratesChart"></canvas></div>
+    <div class="card"><div class="label">P50 / P95 / P99 latency</div><div class="value" id="pValues" style="font-size:13px">-</div><div class="sub">all upstreams</div></div>
+    <div class="card"><div class="label">Error rate</div><div class="value" id="errRate">-</div><div class="sub" id="errSub">-</div></div>
+  </div>
+  <h2>Upstreams</h2>
+  <div class="card" style="padding:0"><div id="upstreams"></div></div>
+  <h2>Top talkers</h2>
+  <div class="group-tabs" id="group-tabs">
+    <button data-g="model" class="active">by model</button>
+    <button data-g="upstream">by upstream</button>
+    <button data-g="alias">by key</button>
+  </div>
+  <table id="breakdown"><thead><tr><th>name</th><th class="num">requests</th><th class="num">input tok</th><th class="num">output tok</th><th class="num">cost USD</th></tr></thead><tbody></tbody></table>
+  <h2>Recent events (live)</h2>
+  <div class="live-tail" id="live-tail"><div class="empty">no events yet</div></div>
+  <p style="color:var(--muted);font-size:11px;margin-top:24px">Read-only view. <a href="/v1/admin/status" style="color:var(--accent)">status</a> | <a href="/v1/admin/metrics" style="color:var(--accent)">metrics JSON</a> | <a href="/v1/admin/metrics/prom" style="color:var(--accent)">Prometheus</a> | <a href="/v1/admin/traces/recent" style="color:var(--accent)">traces</a> | <a href="/v1/admin/rates" style="color:var(--accent)">rates</a></p>
+</main>
+<script>
+let token=localStorage.getItem('pgm_admin_token')||'';
+let refreshMs=5000,pollTimer=null,sseAbort=null,live=true,groupBy='model';
+const rateSeries=new Map();
+const liveBuf=[];
+function getToken(){if(!token){token=prompt('Admin token:');if(token)localStorage.setItem('pgm_admin_token',token);}return token;}
+async function api(p){const r=await fetch(p,{headers:{'Authorization':'Bearer '+getToken()}});if(r.status===401){token='';localStorage.removeItem('pgm_admin_token');document.getElementById('err').textContent='401 unauthorized';document.getElementById('err').style.display='block';throw new Error('unauthorized');}if(!r.ok)throw new Error(p+' '+r.status);return await r.json();}
+function fmtUsd(x){if(!x)return '$0';if(x<0.0001)return '$'+x.toExponential(2);if(x<1)return '$'+x.toFixed(6);return '$'+x.toFixed(2);}
+function fmtNum(x){if(x==null)return '-';if(x>=1e6)return (x/1e6).toFixed(2)+'M';if(x>=1e3)return (x/1e3).toFixed(2)+'k';return x.toString();}
+function fmtMs(us){if(us>=1e6)return (us/1e6).toFixed(2)+'s';if(us>=1e3)return (us/1e3).toFixed(0)+'ms';return us+'us';}
+function ago(s){const d=Math.floor(Date.now()/1000-s);if(d<60)return d+'s';if(d<3600)return Math.floor(d/60)+'m';return Math.floor(d/3600)+'h';}
+function setRefresh(s){refreshMs=s*1000;document.getElementById('refresh-meta').textContent='polling: '+s+'s';if(pollTimer){clearInterval(pollTimer);pollTimer=setInterval(refresh,refreshMs);}}
+function toggleLive(){live=!live;document.getElementById('live-btn').textContent='live: '+(live?'on':'off');document.getElementById('live-btn').classList.toggle('active',live);if(live)startSSE();else stopSSE();}
+function toggleTheme(){const r=document.documentElement;const c=r.getAttribute('data-theme');const n=c==='dark'?'light':'dark';r.setAttribute('data-theme',n);localStorage.setItem('pgm_theme',n);document.getElementById('theme-btn').textContent='theme: '+n;}
+(function(){const t=localStorage.getItem('pgm_theme')||'dark';document.documentElement.setAttribute('data-theme',t);document.getElementById('theme-btn').textContent='theme: '+t;})();
+let ratesChart=null;
+function initRatesChart(){const ctx=document.getElementById('ratesChart').getContext('2d');ratesChart=new Chart(ctx,{type:'line',data:{labels:[],datasets:[{label:'RPS',data:[],borderColor:'#5eafe6',backgroundColor:'rgba(94,175,230,0.1)',tension:0.3,fill:true},{label:'TPS',data:[],borderColor:'#5dd39e',backgroundColor:'rgba(93,211,158,0.1)',tension:0.3,fill:true}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#8a93a3'}}},scales:{x:{display:false},y:{ticks:{color:'#8a93a3'},grid:{color:'rgba(127,127,127,0.1)'}}}}});}
+function pushRatePoint(rps,tps){if(!ratesChart)return;ratesChart.data.labels.push(new Date().toLocaleTimeString());ratesChart.data.datasets[0].data.push(rps);ratesChart.data.datasets[1].data.push(tps);if(ratesChart.data.labels.length>30){ratesChart.data.labels.shift();ratesChart.data.datasets[0].data.shift();ratesChart.data.datasets[1].data.shift();}ratesChart.update('none');}
+function bumpRate(uid){if(!rateSeries.has(uid))rateSeries.set(uid,{count:new Array(30).fill(0)});rateSeries.get(uid).count[rateSeries.get(uid).count.length-1]++;}
+function tickRates(){for(const s of rateSeries.values()){s.count.push(0);if(s.count.length>30)s.count.shift();}}
+setInterval(tickRates,1000);
+function startSSE(){if(sseAbort)return;pollSSE();}
+function stopSSE(){if(sseAbort){sseAbort();sseAbort=null;}}
+async function pollSSE(){try{const r=await fetch('/v1/admin/events/stream',{headers:{'Authorization':'Bearer '+getToken()}});if(!r.ok||!r.body)return;const reader=r.body.getReader();const dec=new TextDecoder();let buf='';sseAbort=()=>reader.cancel();while(live){const{value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n');buf=lines.pop()||'';for(const l of lines){if(l.startsWith('data: ')){try{handleLiveEvent(JSON.parse(l.slice(6)));}catch(e){}}}}sseAbort=null;}catch(e){sseAbort=null;}}
+function handleLiveEvent(ev){if(ev.upstream_id)bumpRate(ev.upstream_id);liveBuf.unshift(ev);if(liveBuf.length>100)liveBuf.length=100;renderLive();renderUpstreams();}
+function renderLive(){const el=document.getElementById('live-tail');if(liveBuf.length===0){el.innerHTML='<div class="empty">no events yet</div>';return;}el.innerHTML=liveBuf.slice(0,30).map(ev=>`<div class="line ${ev.ok?'':'err'}"><span class="ago">${ago(ev.at)} ago</span>${ev.method} <b>${ev.model||'-'}</b> to ${ev.upstream_id||'-'} - ${ev.input_tokens}/${ev.output_tokens} tok - ${fmtUsd(ev.cost_usd)} - ${fmtMs(ev.duration_us)} - ${ev.status_label}${ev.stream?' [stream]':''}</div>`).join('');}
+async function refresh(){try{const[status,byModel,byUpstream,byAlias,metrics,rates]=await Promise.all([api('/v1/admin/status'),api('/v1/admin/usage?group_by=model&limit=10'),api('/v1/admin/usage?group_by=upstream&limit=10'),api('/v1/admin/usage?group_by=alias&limit=10'),api('/v1/admin/metrics'),api('/v1/admin/rates')]);document.getElementById('err').style.display='none';render(status,byModel,byUpstream,byAlias,metrics,rates);window.__upstreams=status.upstreams||[];renderUpstreams();}catch(e){document.getElementById('meta').textContent='error: '+e.message;}}
+function render(status,byModel,byUpstream,byAlias,metrics,rates){document.getElementById('meta').textContent='v'+(status.version||'?')+' - '+status.api_keys+' keys - '+status.upstreams+' upstreams - bind '+(status.bind||'?');const totals=(byModel.totals&&byModel.totals.requests)?byModel.totals:{requests:0,input_tokens:0,output_tokens:0,cost_usd:0};document.getElementById('totals').innerHTML=`<div class="card"><div class="label">Requests</div><div class="value">${fmtNum(totals.requests)}</div><div class="sub">all-time</div></div><div class="card"><div class="label">Input tokens</div><div class="value">${fmtNum(totals.input_tokens)}</div></div><div class="card"><div class="label">Output tokens</div><div class="value">${fmtNum(totals.output_tokens)}</div></div><div class="card"><div class="label">Total cost</div><div class="value">${fmtUsd(totals.cost_usd)}</div></div><div class="card"><div class="label">RPS 1m/5m/1h</div><div class="value" style="font-size:16px">${rates.rps['1m'].toFixed(2)} / ${rates.rps['5m'].toFixed(2)} / ${rates.rps['1h'].toFixed(2)}</div></div><div class="card"><div class="label">TPS 1m/5m/1h</div><div class="value" style="font-size:16px">${rates.tps['1m'].toFixed(1)} / ${rates.tps['5m'].toFixed(1)} / ${rates.tps['1h'].toFixed(1)}</div></div>`;const rd=metrics.histograms.request_duration_seconds;document.getElementById('pValues').textContent=`${fmtMs(rd.p50_us)} / ${fmtMs(rd.p95_us)} / ${fmtMs(rd.p99_us)}`;const sum=(arr)=>(arr||[]).reduce((a,b)=>a+b.value,0);const totalReq=sum(metrics.counters.requests_total);const totalErr=sum(metrics.counters.error_total);const errPct=totalReq>0?(totalErr*100/totalReq):0;document.getElementById('errRate').textContent=errPct.toFixed(2)+'%';document.getElementById('errSub').textContent=totalErr+' / '+totalReq+' requests';pushRatePoint(rates.rps['1m'],rates.tps['1m']);const source=groupBy==='upstream'?byUpstream:(groupBy==='alias'?byAlias:byModel);const tbody=document.querySelector('#breakdown tbody');if(!source.buckets||source.buckets.length===0){tbody.innerHTML='<tr><td colspan="5" class="empty">no usage yet</td></tr>';}else{tbody.innerHTML=source.buckets.map(b=>`<tr><td>${b.key}</td><td class="num">${fmtNum(b.requests)}</td><td class="num">${fmtNum(b.input_tokens)}</td><td class="num">${fmtNum(b.output_tokens)}</td><td class="num">${fmtUsd(b.cost_usd)}</td></tr>`).join('');}}
+function renderUpstreams(){const ups=window.__upstreams||[];document.getElementById('upstreams').innerHTML=ups.map(x=>{const cls=x.health==='healthy'?'':(x.health==='degraded'?'warn':'err');const s=rateSeries.get(x.id)||{count:[]};const max=Math.max(1,...s.count);const bars=s.count.map(c=>`<div style="display:inline-block;width:4px;height:${Math.max(2,(c/max)*36)}px;background:var(--accent);margin-right:1px;vertical-align:bottom" title="${c} req/s"></div>`).join('');return `<div class="upstream"><div class="name"><span class="status-dot ${cls}"></span><b>${x.id}</b><small>${x.kind} - ${x.base_url}</small></div><div>${bars||'<span style="color:var(--muted);font-size:11px">awaiting events</span>'}</div><div class="pills"><span class="pill">in-flight: ${x.in_flight}</span><span class="pill">ok: ${x.success_count}</span><span class="pill">err: ${x.failure_count}</span><span class="pill">${x.models.join(', ')||'*'}</span></div></div>`;}).join('')||'<div class="empty">no upstreams configured</div>';}
+document.querySelectorAll('#group-tabs button').forEach(b=>{b.addEventListener('click',()=>{document.querySelectorAll('#group-tabs button').forEach(x=>x.classList.remove('active'));b.classList.add('active');groupBy=b.dataset.g;refresh();});});
+initRatesChart();
+refresh();
+pollTimer=setInterval(refresh,refreshMs);
+if(live)startSSE();
+</script>
+</body>
+</html>
