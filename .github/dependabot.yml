@@ -8,7 +8,15 @@ updates:
       prefix: "deps"
     labels:
       - "dependencies"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    # Only allow patch updates and same-version-range updates.
+    # Major-version bumps (axum 0.7→0.8, notify 6→8, rand 0.8→0.9, etc.)
+    # need code changes and should be adopted manually.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -19,3 +27,6 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
