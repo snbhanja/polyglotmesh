@@ -744,7 +744,24 @@ async fn admin_traces_recent(
     axum::extract::Query(q): axum::extract::Query<TracesQuery>,
 ) -> Response {
     let limit = q.limit.unwrap_or(50).min(1000);
-    let spans = state.metrics.traces.snapshot(limit as usize);
+    let raw = state.metrics.traces.snapshot(limit as usize);
+    // Map our internal snake_case `TraceSpan` into OTLP-shaped camelCase.
+    let spans: Vec<serde_json::Value> = raw.into_iter().map(|s| {
+        let attrs: Vec<serde_json::Value> = s.attributes.into_iter()
+            .map(|(k, v)| serde_json::json!({"key": k, "value": {"stringValue": v}}))
+            .collect();
+        serde_json::json!({
+            "traceId": s.trace_id,
+            "spanId": s.span_id,
+            "parentSpanId": s.parent_span_id,
+            "name": s.name,
+            "kind": s.kind,
+            "startTimeUnixNano": s.start_unix_nano,
+            "endTimeUnixNano": s.end_unix_nano,
+            "status": { "code": s.status_code },
+            "attributes": attrs,
+        })
+    }).collect();
     (axum::http::StatusCode::OK, Json(serde_json::json!({
         "resourceSpans": [{
             "resource": { "attributes": [{"key": "service.name", "value": "polyglotmesh"}] },
