@@ -28,11 +28,6 @@ impl RequestTimer {
     pub fn new(method: &'static str, model: Option<String>, stream: bool) -> Self {
         Self { start: std::time::Instant::now(), upstream_start: None, first_byte: None, method, model, stream }
     }
-    pub fn observe_first_byte(&mut self) {
-        if self.first_byte.is_none() {
-            self.first_byte = Some(std::time::Instant::now());
-        }
-    }
     /// Emit final metrics for this request. Safe to call from a Drop-style
     /// context (no awaits). `ok` true → success, false → error. For streams
     /// the cost/token totals come from the watcher, so this only emits
@@ -170,10 +165,6 @@ pub async fn auth_middleware(
     };
     req.extensions_mut().insert(rec);
     next.run(req).await
-}
-
-fn get_key(req: &Request) -> Option<Arc<KeyRecord>> {
-    req.extensions().get::<Arc<KeyRecord>>().cloned()
 }
 
 fn get_key_from_parts(parts: &axum::http::request::Parts) -> Option<Arc<KeyRecord>> {

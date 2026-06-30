@@ -681,7 +681,7 @@ impl Storage {
     /// admin-token alias that triggered it. `detail` is a free-form JSON
     /// string (or empty) for context.
     pub fn append_audit(&self, action: &str, actor: &str, detail: &str) -> RouterResult<i64> {
-        let mut conn = self.conn.lock();
+        let conn = self.conn.lock();
         let now = now_unix();
         conn.execute(
             "INSERT INTO audit_events (action, actor, detail, at) VALUES (?1, ?2, ?3, ?4)",

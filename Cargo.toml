@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "polyglotmesh — a single OpenAI/Anthropic-compatible base URL in front of many LLM providers, with priority routing, per-key limits, queueing, and built-in observability."
 license = "MIT"
-license-file = "LICENSE"
 readme = "README.md"
 keywords = ["llm", "router", "openai", "anthropic", "gateway", "ai", "observability"]
 categories = ["api-bindings", "network-programming", "command-line-utilities"]

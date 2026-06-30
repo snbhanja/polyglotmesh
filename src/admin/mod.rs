@@ -1,13 +1,14 @@
-use crate::auth::{generate_admin_key, generate_api_key, KeyRecord};
+use crate::auth::{generate_admin_key, generate_api_key};
 use crate::config::types::{
-    ApiKeyConfig, Config, ModelAliasEntry, ProviderKind, UpstreamConfig,
+    ApiKeyConfig, ModelAliasEntry, ProviderKind, UpstreamConfig,
 };
-use crate::error::{RouterError, RouterResult};
+use crate::error::RouterError;
+
 use crate::state::AppState;
 use crate::storage::UsageBucket;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -331,7 +332,7 @@ async fn create_key(
     headers: axum::http::HeaderMap,
     body: Option<Json<CreateKeyBody>>,
 ) -> Response {
-    let mut body = body.map(|b| b.0).unwrap_or_default();
+    let body = body.map(|b| b.0).unwrap_or_default();
     let mut key_cfg: ApiKeyConfig = match serde_json::from_value(serde_json::Value::Object(body.fields.clone())) {
         Ok(c) => c,
         Err(e) => {
@@ -763,7 +764,7 @@ pub struct TracesQuery { #[serde(default)] pub limit: Option<u32> }
 /// request. The dashboard uses this for the live-tail view.
 async fn admin_events_stream(State(state): State<SharedState>) -> Response {
     use axum::body::Body;
-    use futures::StreamExt;
+
     let mut rx = state.metrics.events.subscribe();
     let stream = async_stream::stream! {
         loop {

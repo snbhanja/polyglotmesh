@@ -1,9 +1,8 @@
 use crate::config::types::{ProviderKind, UpstreamConfig};
-use crate::error::RouterResult;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -298,42 +297,6 @@ impl UpstreamRegistry {
         *self.by_provider.write() = all;
     }
 }
-
-/// Time-budget for a single request routed through the proxy.
-#[derive(Debug, Clone, Copy)]
-pub struct RequestBudget {
-    pub total: Duration,
-    pub started: Instant,
-}
-
-impl RequestBudget {
-    pub fn new(ms: u64) -> Self {
-        Self {
-            total: Duration::from_millis(ms),
-            started: Instant::now(),
-        }
-    }
-
-    pub fn remaining(&self) -> Duration {
-        self.total.saturating_sub(self.started.elapsed())
-    }
-}
-
-pub fn gen_id(prefix: &str) -> String {
-    use rand::Rng;
-    let suffix: u64 = rand::thread_rng().gen();
-    format!("{prefix}-{suffix:016x}")
-}
-
-pub fn ensure_api_key(key: &str) -> RouterResult<()> {
-    if key.trim().is_empty() {
-        return Err(crate::error::RouterError::BadRequest(
-            "API key cannot be empty".into(),
-        ));
-    }
-    Ok(())
-}
-
 
 impl UpstreamRegistry {
     /// Resolve a logical model name to the actual upstream model name based on aliases.
