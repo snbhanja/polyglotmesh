@@ -581,7 +581,7 @@ async fn reload_config(
 }
 
 
-/// GET /v1/admin/usage?group_by=alias|upstream|model|all&since=<unix>&until=<unix>
+/// GET `/v1/admin/usage?group_by=alias|upstream|model|all&since=<unix>&until=<unix>`
 async fn admin_usage(
     State(state): State<SharedState>,
     axum::extract::Query(q): axum::extract::Query<UsageQuery>,

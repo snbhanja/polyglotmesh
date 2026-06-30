@@ -1,0 +1,81 @@
+name: Release
+
+# Runs `cargo dist build` on every push to a tag matching v*.*.* and
+# uploads the resulting tarballs/zips as release artifacts.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+# Need these permissions to create a GitHub release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: tar.xz
+          - target: x86_64-apple-darwin
+            archive: tar.xz
+          - target: aarch64-apple-darwin
+            archive: tar.xz
+          - target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin polyglotmesh
+      - name: Package (unix)
+        if: matrix.archive == 'tar.xz' && matrix.target != 'x86_64-pc-windows-msvc'
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          tar -cJf ../../../dist/polyglotmesh-${{ matrix.target }}.tar.xz polyglotmesh
+      - name: Package (windows)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          (cd .. && zip -j ../../../dist/polyglotmesh-${{ matrix.target }}.zip release/polyglotmesh.exe)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyglotmesh-${{ matrix.target }}
+          path: dist/polyglotmesh-${{ matrix.target }}.*
+          if-no-files-found: warn
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
