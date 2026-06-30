@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   build:
@@ -16,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        # The smoke test uses `fuser` (psmisc) to clean up ports on exit.
+        run: sudo apt-get update && sudo apt-get install -y psmisc
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -31,6 +33,9 @@ jobs:
       - name: cargo test
         run: cargo test --release
       - name: smoke test
+        # The smoke script uses `set -euo pipefail` and reads the just-built binary
+        # from target/release/polyglotmesh. It listens on 127.0.0.1:18091 and three
+        # mock-upstream ports; `fuser -k` (psmisc) cleans them up on exit.
         run: bash scripts/smoke-test.sh
 
   lint:
@@ -44,5 +49,7 @@ jobs:
           components: rustfmt, clippy
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
+      # `-D warnings` lives here (not as a global RUSTFLAGS) so that harmless
+      # warnings from `cargo test` or downstream crates can't fail CI.
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
