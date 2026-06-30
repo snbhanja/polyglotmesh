@@ -1,0 +1,27 @@
+name: CI (quick)
+
+# Minimal CI that just runs cargo build + smoke test. Used as a
+# fallback when the main CI workflow is stuck in the runner queue.
+# Triggered by tag pushes and workflow_dispatch only — does NOT fire
+# on every push (that's what the main ci.yml is for).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & smoke (quick)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y psmisc
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin polyglotmesh
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh
