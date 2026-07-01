@@ -18,9 +18,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `main.rs:cmd_key` (changed `"api" | _` to just `_`).
 - Removed a stray empty doc line in `proxy/mod.rs` that clippy flagged.
 - CI: relaxed the `cargo clippy` step to `-A` the most common style
-  nits (`too_many_arguments`, `if_let_chains`, `redundant_closure`,
-  `large_types_passed_by_value`, `deref_addrof`, `io_other_error`,
-  `if_let_some_else_nested`) so a warning doesn't fail CI on style.
+  nits (`too_many_arguments`, `redundant_closure`, `io_other_error`,
+  `needless_borrow`, `collapsible_match`, `while_let_loop`,
+  `large_types_passed_by_value`, `large_enum_variant`) so a warning
+  doesn't fail CI on style. The first attempt used three non-existent
+  clippy lint names (`if_let_chains`, `if_let_some_else_nested`,
+  `deref_addrof`) which tripped `unknown-lints` under `-D warnings` and
+  failed the CI run; this commit corrects the names to the real
+  clippy 1.96 lints the codebase actually emits.
 
 ## [0.1.1] - 2026-06-30
 
