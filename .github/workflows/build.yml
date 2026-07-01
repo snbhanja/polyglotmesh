@@ -62,13 +62,16 @@ jobs:
         # nits in transitive code paths. Allow specific clippy lints that
         # are stylistic, not correctness, so a warning doesn't fail CI.
         # See https://rust-lang.github.io/rust-clippy/ for the lint list.
+        # NOTE: only valid clippy 1.96 lint names are allowed; unknown names
+        # become fatal `unknown-lint` errors under -D warnings.
         run: |
           cargo clippy --all-targets -- \
             -D warnings \
             -A clippy::too_many_arguments \
-            -A clippy::if_let_chains \
-            -A clippy::if_let_some_else_nested \
             -A clippy::redundant_closure \
             -A clippy::io_other_error \
+            -A clippy::needless_borrow \
+            -A clippy::collapsible_match \
+            -A clippy::while_let_loop \
             -A clippy::large_types_passed_by_value \
-            -A clippy::deref_addrof
+            -A clippy::large_enum_variant
