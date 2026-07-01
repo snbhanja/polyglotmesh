@@ -8,12 +8,12 @@ mod admin;
 mod auth;
 mod config;
 mod error;
+mod metrics;
 mod proxy;
 mod queue;
 mod state;
 mod storage;
 mod upstream;
-mod metrics;
 
 use crate::config::types::ProviderKind;
 use crate::config::{load_from_path, RouterPaths};
@@ -21,7 +21,11 @@ use crate::error::RouterResult;
 use crate::state::AppState;
 
 #[derive(Parser, Debug)]
-#[command(name = "polyglotmesh", version, about = "Fast Rust LLM router for OpenAI/Anthropic-compatible APIs")]
+#[command(
+    name = "polyglotmesh",
+    version,
+    about = "Fast Rust LLM router for OpenAI/Anthropic-compatible APIs"
+)]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -106,7 +110,8 @@ fn load_config(cli: &Cli) -> RouterResult<(PathBuf, crate::config::types::Config
 
 fn save_config(path: &PathBuf, cfg: &crate::config::types::Config) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
     }
     crate::config::save_to_path(path, cfg)?;
     Ok(())
@@ -194,8 +199,14 @@ fn cmd_init(cli: &Cli, bind: &str, gen_key: bool) -> anyhow::Result<()> {
     println!("Bind: {}", cfg.server.bind);
     if let Some(k) = generated_key {
         println!();
-        println!("OpenAI-compatible base URL:    http://{}/v1", cfg.server.bind);
-        println!("Anthropic-compatible base URL: http://{}/v1", cfg.server.bind);
+        println!(
+            "OpenAI-compatible base URL:    http://{}/v1",
+            cfg.server.bind
+        );
+        println!(
+            "Anthropic-compatible base URL: http://{}/v1",
+            cfg.server.bind
+        );
         println!();
         println!("Your self-issued API key (Bearer token): {k}");
         println!();
@@ -217,7 +228,7 @@ fn cmd_key(cli: &Cli, role: &str) -> anyhow::Result<()> {
             save_config(&path, &cfg)?;
             println!("Admin token: {k}");
         }
-        "api" | _ => {
+        _ => {
             let k = auth::generate_api_key();
             cfg.api_keys_legacy.push(k.clone());
             save_config(&path, &cfg)?;
@@ -295,7 +306,10 @@ fn cmd_upstream_list(cli: &Cli) -> anyhow::Result<()> {
         println!("(no upstreams configured)");
         return Ok(());
     }
-    println!("{:<22} {:<10} {:<10} {:<6} {:<7} {:<6} MODELS", "ID", "KIND", "BASE_URL", "PRIO", "RPM", "TPM");
+    println!(
+        "{:<22} {:<10} {:<10} {:<6} {:<7} {:<6} MODELS",
+        "ID", "KIND", "BASE_URL", "PRIO", "RPM", "TPM"
+    );
     for u in &cfg.upstreams {
         println!(
             "{:<22} {:<10} {:<10} {:<6} {:<7} {:<6} {}",
@@ -305,7 +319,11 @@ fn cmd_upstream_list(cli: &Cli) -> anyhow::Result<()> {
             u.priority,
             u.rate_limit_rpm,
             u.rate_limit_tpm,
-            if u.models.is_empty() { "*".to_string() } else { u.models.join(",") }
+            if u.models.is_empty() {
+                "*".to_string()
+            } else {
+                u.models.join(",")
+            }
         );
     }
     Ok(())
@@ -322,7 +340,10 @@ fn truncate(s: &str, n: usize) -> String {
 fn cmd_show(cli: &Cli) -> anyhow::Result<()> {
     let (path, cfg) = load_config(cli).context("load config")?;
     println!("# {}", path.display());
-    println!("{}", toml::to_string_pretty(&cfg).unwrap_or_else(|_| "(unparseable)".to_string()));
+    println!(
+        "{}",
+        toml::to_string_pretty(&cfg).unwrap_or_else(|_| "(unparseable)".to_string())
+    );
     Ok(())
 }
 
@@ -335,7 +356,9 @@ async fn cmd_serve(cli: &Cli, bind_override: Option<String>) -> anyhow::Result<(
         eprintln!("warning: no self-issued API keys configured. Run `polyglotmesh init` first.");
     }
     if cfg.upstreams.is_empty() {
-        eprintln!("warning: no upstreams configured. Add some with `polyglotmesh upstream add ...`");
+        eprintln!(
+            "warning: no upstreams configured. Add some with `polyglotmesh upstream add ...`"
+        );
     }
     let state = Arc::new(AppState::from_config(cfg.clone()));
 
@@ -386,8 +409,5 @@ use axum::http::header;
 use axum::response::IntoResponse;
 async fn dashboard() -> impl IntoResponse {
     const HTML: &str = include_str!("../static/dashboard.html");
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        HTML,
-    )
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], HTML)
 }

@@ -204,21 +204,31 @@ impl AuthStore {
     }
 
     pub fn admin_key_count(&self) -> usize {
-        self.keys.read().iter().filter(|k| k.role == "admin").count()
+        self.keys
+            .read()
+            .iter()
+            .filter(|k| k.role == "admin")
+            .count()
     }
 
     pub fn validate_api_key(&self, raw: &str) -> bool {
         if raw.is_empty() {
             return false;
         }
-        self.keys.read().iter().any(|k| k.raw == raw && k.role == "api")
+        self.keys
+            .read()
+            .iter()
+            .any(|k| k.raw == raw && k.role == "api")
     }
 
     pub fn validate_admin_key(&self, raw: &str) -> bool {
         if raw.is_empty() {
             return false;
         }
-        self.keys.read().iter().any(|k| k.raw == raw && k.role == "admin")
+        self.keys
+            .read()
+            .iter()
+            .any(|k| k.raw == raw && k.role == "admin")
     }
 
     /// Look up a key record by raw string.
@@ -279,7 +289,10 @@ pub fn generate_admin_key() -> String {
 }
 
 pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let h = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let h = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     let t = h.trim();
     let t = t.strip_prefix("Bearer ").unwrap_or(t).trim();
     if t.is_empty() {
@@ -337,7 +350,9 @@ pub fn authorize(
                     None
                 }
             })
-            .map_err(|_| RouterError::TooManyRequests("max_parallel_requests exceeded for this key".into()))?;
+            .map_err(|_| {
+                RouterError::TooManyRequests("max_parallel_requests exceeded for this key".into())
+            })?;
         let _ = cur;
     }
     // Budget check
@@ -365,8 +380,12 @@ pub fn authorize(
 /// Record token usage for a key. Called after a successful response (or stream open).
 pub fn record_usage(rec: &KeyRecord, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
     rec.usage.total_requests.fetch_add(1, Ordering::Relaxed);
-    rec.usage.total_input_tokens.fetch_add(input_tokens, Ordering::Relaxed);
-    rec.usage.total_output_tokens.fetch_add(output_tokens, Ordering::Relaxed);
+    rec.usage
+        .total_input_tokens
+        .fetch_add(input_tokens, Ordering::Relaxed);
+    rec.usage
+        .total_output_tokens
+        .fetch_add(output_tokens, Ordering::Relaxed);
     rec.usage
         .total_spend_usd
         .fetch_add((cost_usd * 1000.0) as u64, Ordering::Relaxed);

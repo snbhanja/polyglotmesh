@@ -1,7 +1,5 @@
 use crate::auth::{generate_admin_key, generate_api_key};
-use crate::config::types::{
-    ApiKeyConfig, ModelAliasEntry, ProviderKind, UpstreamConfig,
-};
+use crate::config::types::{ApiKeyConfig, ModelAliasEntry, ProviderKind, UpstreamConfig};
 use crate::error::RouterError;
 
 use crate::state::AppState;
@@ -19,7 +17,10 @@ pub type SharedState = Arc<AppState>;
 pub fn admin_router(state: SharedState) -> Router<SharedState> {
     Router::new()
         .route("/v1/admin/status", get(admin_status))
-        .route("/v1/admin/upstreams", get(list_upstreams).post(create_upstream))
+        .route(
+            "/v1/admin/upstreams",
+            get(list_upstreams).post(create_upstream),
+        )
         .route(
             "/v1/admin/upstreams/:id",
             get(get_upstream)
@@ -29,7 +30,10 @@ pub fn admin_router(state: SharedState) -> Router<SharedState> {
         )
         .route("/v1/admin/upstreams/:id/pause", post(pause_upstream))
         .route("/v1/admin/upstreams/:id/resume", post(resume_upstream))
-        .route("/v1/admin/upstreams/:id/prices", get(get_upstream_prices).post(set_upstream_prices))
+        .route(
+            "/v1/admin/upstreams/:id/prices",
+            get(get_upstream_prices).post(set_upstream_prices),
+        )
         .route("/v1/admin/keys", get(list_keys).post(create_key))
         .route("/v1/admin/keys/:alias", delete(revoke_key_by_alias))
         .route("/v1/admin/reload", post(reload_config))
@@ -45,7 +49,10 @@ pub fn admin_router(state: SharedState) -> Router<SharedState> {
         .route("/v1/admin/audit", get(admin_audit))
         .route("/v1/admin/aliases", get(list_aliases).put(set_aliases))
         .route("/v1/admin/aliases/:name", delete(delete_alias))
-        .route("/v1/admin/model_list", get(list_model_list).put(put_model_list))
+        .route(
+            "/v1/admin/model_list",
+            get(list_model_list).put(put_model_list),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
@@ -69,7 +76,9 @@ fn actor_from_headers(headers: &axum::http::HeaderMap) -> String {
     if let Some(h) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = h.to_str() {
             // Strip "Bearer " prefix and keep the alias portion (e.g. "pgm-admin-abcd1234").
-            let tok = s.trim_start_matches("Bearer ").trim_start_matches("bearer ");
+            let tok = s
+                .trim_start_matches("Bearer ")
+                .trim_start_matches("bearer ");
             return tok.split('.').next().unwrap_or(tok).to_string();
         }
     }
@@ -102,10 +111,7 @@ async fn list_upstreams(State(state): State<SharedState>) -> Response {
     (axum::http::StatusCode::OK, Json(body)).into_response()
 }
 
-async fn get_upstream(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn get_upstream(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     match state.registry.get(&id) {
         Some(u) => (axum::http::StatusCode::OK, Json(u.snapshot())).into_response(),
         None => RouterError::UpstreamNotFound.into_response(),
@@ -226,10 +232,7 @@ async fn update_upstream(
     (axum::http::StatusCode::OK, Json(cfg)).into_response()
 }
 
-async fn delete_upstream(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn delete_upstream(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     {
         let mut w = state.config.write();
         w.upstreams.retain(|u| u.id != id);
@@ -259,10 +262,15 @@ async fn control_upstream(
         return RouterError::UpstreamNotFound.into_response();
     };
     match body.action.as_str() {
-        "enable" => { u.cfg.write().enabled = true; }
-        "disable" => { u.cfg.write().enabled = false; }
+        "enable" => {
+            u.cfg.write().enabled = true;
+        }
+        "disable" => {
+            u.cfg.write().enabled = false;
+        }
         "reset" => {
-            u.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+            u.consecutive_failures
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             *u.health.write() = crate::upstream::Health::Healthy;
         }
         other => {
@@ -280,10 +288,7 @@ async fn control_upstream(
     (axum::http::StatusCode::OK, Json(u.snapshot())).into_response()
 }
 
-async fn pause_upstream(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn pause_upstream(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     let Some(u) = state.registry.get(&id) else {
         return RouterError::UpstreamNotFound.into_response();
     };
@@ -292,10 +297,7 @@ async fn pause_upstream(
     (axum::http::StatusCode::OK, Json(u.snapshot())).into_response()
 }
 
-async fn resume_upstream(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn resume_upstream(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     let Some(u) = state.registry.get(&id) else {
         return RouterError::UpstreamNotFound.into_response();
     };
@@ -333,13 +335,16 @@ async fn create_key(
     body: Option<Json<CreateKeyBody>>,
 ) -> Response {
     let body = body.map(|b| b.0).unwrap_or_default();
-    let mut key_cfg: ApiKeyConfig = match serde_json::from_value(serde_json::Value::Object(body.fields.clone())) {
-        Ok(c) => c,
-        Err(e) => {
-            return RouterError::BadRequest(format!("invalid key fields: {e}")).into_response();
-        }
-    };
-    if let Some(r) = &body.role { key_cfg.role = r.clone(); }
+    let mut key_cfg: ApiKeyConfig =
+        match serde_json::from_value(serde_json::Value::Object(body.fields.clone())) {
+            Ok(c) => c,
+            Err(e) => {
+                return RouterError::BadRequest(format!("invalid key fields: {e}")).into_response();
+            }
+        };
+    if let Some(r) = &body.role {
+        key_cfg.role = r.clone();
+    }
     if body.generate || key_cfg.key.is_none() {
         let new_key = match key_cfg.role.as_str() {
             "admin" => generate_admin_key(),
@@ -366,16 +371,23 @@ async fn create_key(
     }
     let _ = state.save_to_disk();
     let rec = state.auth.lookup(&raw);
-    let usage = rec.as_ref().map(|r| r.usage.snapshot()).unwrap_or(serde_json::json!({}));
+    let usage = rec
+        .as_ref()
+        .map(|r| r.usage.snapshot())
+        .unwrap_or(serde_json::json!({}));
     let actor = actor_from_headers(&headers);
     let detail = format!(r#"{{"alias":"{}","role":"{}"}}"#, alias, key_cfg.role);
     let _ = state.storage.append_audit("key.create", &actor, &detail);
-    (axum::http::StatusCode::CREATED, Json(CreatedKey {
-        key: raw,
-        key_alias: alias,
-        role: key_cfg.role.clone(),
-        usage,
-    })).into_response()
+    (
+        axum::http::StatusCode::CREATED,
+        Json(CreatedKey {
+            key: raw,
+            key_alias: alias,
+            role: key_cfg.role.clone(),
+            usage,
+        }),
+    )
+        .into_response()
 }
 
 async fn list_keys(State(state): State<SharedState>) -> Response {
@@ -423,22 +435,22 @@ async fn revoke_key_by_alias(
     }
 }
 
-
 // ---- Per-upstream pricing (override the built-in default price table) ----
 
-async fn get_upstream_prices(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn get_upstream_prices(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     match state.registry.get(&id) {
         Some(u) => {
             let prices = u.model_info();
             let known = u.known_models();
-            (axum::http::StatusCode::OK, Json(serde_json::json!({
-                "id": id,
-                "model_info": prices,
-                "known_models": known,
-            }))).into_response()
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": id,
+                    "model_info": prices,
+                    "known_models": known,
+                })),
+            )
+                .into_response()
         }
         None => RouterError::UpstreamNotFound.into_response(),
     }
@@ -452,7 +464,9 @@ pub struct PricesBody {
     pub prices: std::collections::BTreeMap<String, crate::config::types::ModelCost>,
 }
 
-fn default_true_bool() -> bool { true }
+fn default_true_bool() -> bool {
+    true
+}
 
 async fn set_upstream_prices(
     State(state): State<SharedState>,
@@ -469,7 +483,9 @@ async fn set_upstream_prices(
         let mut w = state.config.write();
         if let Some(cfg) = w.upstreams.iter_mut().find(|u| u.id == id) {
             if body.merge {
-                for (k, v) in &body.prices { cfg.model_info.insert(k.clone(), v.clone()); }
+                for (k, v) in &body.prices {
+                    cfg.model_info.insert(k.clone(), v.clone());
+                }
             } else {
                 cfg.model_info = body.prices.clone();
             }
@@ -479,18 +495,28 @@ async fn set_upstream_prices(
     }
     let _ = state.save_to_disk();
 
-    let cfg = state.config.read().upstreams.iter().find(|u| u.id == id).cloned();
+    let cfg = state
+        .config
+        .read()
+        .upstreams
+        .iter()
+        .find(|u| u.id == id)
+        .cloned();
     if let Some(c) = cfg {
         let _ = state.storage.upsert_upstream(&c);
     }
 
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "status": "ok",
-        "id": id,
-        "merge": body.merge,
-        "applied": body.prices.len(),
-        "total_prices": upstream.model_info().len(),
-    }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "id": id,
+            "merge": body.merge,
+            "applied": body.prices.len(),
+            "total_prices": upstream.model_info().len(),
+        })),
+    )
+        .into_response()
 }
 
 // ---- Aliases / model_list ----
@@ -506,26 +532,21 @@ pub struct AliasesBody {
     pub entries: Vec<ModelAliasEntry>,
 }
 
-async fn set_aliases(
-    State(state): State<SharedState>,
-    Json(body): Json<AliasesBody>,
-) -> Response {
+async fn set_aliases(State(state): State<SharedState>, Json(body): Json<AliasesBody>) -> Response {
     {
         let mut w = state.config.write();
         if body.entries.is_empty() {
             w.model_aliases.remove(&body.name);
         } else {
-            w.model_aliases.insert(body.name.clone(), body.entries.clone());
+            w.model_aliases
+                .insert(body.name.clone(), body.entries.clone());
         }
     }
     let _ = state.save_to_disk();
     (axum::http::StatusCode::OK, Json(body)).into_response()
 }
 
-async fn delete_alias(
-    State(state): State<SharedState>,
-    Path(name): Path<String>,
-) -> Response {
+async fn delete_alias(State(state): State<SharedState>, Path(name): Path<String>) -> Response {
     let removed = {
         let mut w = state.config.write();
         w.model_aliases.remove(&name).is_some()
@@ -555,7 +576,6 @@ async fn put_model_list(
     (axum::http::StatusCode::OK, Json(body)).into_response()
 }
 
-
 async fn reload_config(
     State(state): State<SharedState>,
     headers: axum::http::HeaderMap,
@@ -563,10 +583,17 @@ async fn reload_config(
     let actor = actor_from_headers(&headers);
     match state.reload_from_disk() {
         Ok(summary) => {
-            let detail = format!(r#"{{"keys":{},"upstreams":{},"status":"{}"}}"#,
+            let detail = format!(
+                r#"{{"keys":{},"upstreams":{},"status":"{}"}}"#,
                 summary.get("keys").and_then(|v| v.as_u64()).unwrap_or(0),
-                summary.get("upstreams").and_then(|v| v.as_u64()).unwrap_or(0),
-                summary.get("status").and_then(|v| v.as_str()).unwrap_or("reloaded"),
+                summary
+                    .get("upstreams")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                summary
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("reloaded"),
             );
             let _ = state.storage.append_audit("config.reload", &actor, &detail);
             (axum::http::StatusCode::OK, Json(summary)).into_response()
@@ -574,12 +601,14 @@ async fn reload_config(
         Err(e) => {
             let detail = format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"));
             let _ = state.storage.append_audit("config.reload", &actor, &detail);
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(serde_json::json!({"status": "error", "error": format!("{e}")}))).into_response()
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+            )
+                .into_response()
         }
     }
 }
-
 
 /// GET `/v1/admin/usage?group_by=alias|upstream|model|all&since=<unix>&until=<unix>`
 async fn admin_usage(
@@ -599,16 +628,21 @@ async fn admin_usage(
         requests: buckets.iter().map(|b| b.requests).sum(),
         input_tokens: buckets.iter().map(|b| b.input_tokens).sum(),
         output_tokens: buckets.iter().map(|b| b.output_tokens).sum(),
-        cost_usd: (buckets.iter().map(|b| b.cost_usd).sum::<f64>() * 1_000_000.0).round() / 1_000_000.0,
+        cost_usd: (buckets.iter().map(|b| b.cost_usd).sum::<f64>() * 1_000_000.0).round()
+            / 1_000_000.0,
     };
     let top: Vec<UsageBucket> = buckets.into_iter().take(limit as usize).collect();
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "group_by": group_by,
-        "since": since,
-        "until": until,
-        "totals": totals,
-        "buckets": top,
-    }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "group_by": group_by,
+            "since": since,
+            "until": until,
+            "totals": totals,
+            "buckets": top,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -631,13 +665,23 @@ async fn admin_usage_recent(
     let limit = q.limit.unwrap_or(50).min(1000);
     let events = match state.storage.last_events(limit) {
         Ok(e) => e,
-        Err(e) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{e}"),
+            )
+                .into_response()
+        }
     };
     let count = events.len();
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "count": count,
-        "events": events,
-    }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "count": count,
+            "events": events,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -664,17 +708,30 @@ pub fn spawn_health_checker(state: SharedState) {
                 }
                 let cfg = u.cfg.read().clone();
                 let url = match cfg.kind {
-                    ProviderKind::Openai => format!("{}/models", cfg.base_url.trim_end_matches('/')),
-                    ProviderKind::Anthropic => format!("{}/v1/messages", cfg.base_url.trim_end_matches('/')),
+                    ProviderKind::Openai => {
+                        format!("{}/models", cfg.base_url.trim_end_matches('/'))
+                    }
+                    ProviderKind::Anthropic => {
+                        format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'))
+                    }
                 };
-                let mut req = state.http.request(reqwest::Method::GET, &url).timeout(timeout);
+                let mut req = state
+                    .http
+                    .request(reqwest::Method::GET, &url)
+                    .timeout(timeout);
                 req = match cfg.kind {
-                    ProviderKind::Openai => req.header("Authorization", format!("Bearer {}", cfg.api_key)),
+                    ProviderKind::Openai => {
+                        req.header("Authorization", format!("Bearer {}", cfg.api_key))
+                    }
                     ProviderKind::Anthropic => req.header("x-api-key", cfg.api_key.clone()),
                 };
                 let resp = req.send().await;
                 match resp {
-                    Ok(r) if r.status().is_success() || r.status().as_u16() == 405 || r.status().as_u16() == 404 => {
+                    Ok(r)
+                        if r.status().is_success()
+                            || r.status().as_u16() == 405
+                            || r.status().as_u16() == 404 =>
+                    {
                         u.record_success();
                     }
                     Ok(r) => {
@@ -691,7 +748,6 @@ pub fn spawn_health_checker(state: SharedState) {
     });
 }
 
-
 /// POST /v1/admin/usage/retention  body: { "days": 30 }   (days=0 disables retention)
 async fn set_retention(
     State(state): State<SharedState>,
@@ -706,18 +762,20 @@ async fn set_retention(
     let actor = actor_from_headers(&headers);
     let detail = format!(r#"{{"days":{}}}"#, body.days);
     let _ = state.storage.append_audit("retention.set", &actor, &detail);
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "status": "ok",
-        "usage_retention_days": body.days,
-    }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "usage_retention_days": body.days,
+        })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
 pub struct RetentionBody {
     pub days: u32,
 }
-
-
 
 /// GET /v1/admin/metrics  — JSON snapshot of counters, histograms, gauges.
 async fn admin_metrics_json(State(state): State<SharedState>) -> Response {
@@ -728,15 +786,22 @@ async fn admin_metrics_json(State(state): State<SharedState>) -> Response {
 /// GET /v1/admin/metrics/prom  — Prometheus text format, scrape-compatible.
 async fn admin_metrics_prom(State(state): State<SharedState>) -> Response {
     let text = state.metrics.prometheus_text();
-    (axum::http::StatusCode::OK, [("content-type", "text/plain; version=0.0.4")], text).into_response()
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        text,
+    )
+        .into_response()
 }
-
 
 /// GET /v1/admin/rates — sliding-window RPS, TPS, cost/sec over 1m/5m/1h.
 async fn admin_rates(State(state): State<SharedState>) -> Response {
-    (axum::http::StatusCode::OK, Json(state.metrics.rates.read().snapshot())).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(state.metrics.rates.read().snapshot()),
+    )
+        .into_response()
 }
-
 
 /// GET /v1/admin/traces/recent?limit=N — OTLP-shaped JSON of the most recent spans.
 async fn admin_traces_recent(
@@ -746,36 +811,47 @@ async fn admin_traces_recent(
     let limit = q.limit.unwrap_or(50).min(1000);
     let raw = state.metrics.traces.snapshot(limit as usize);
     // Map our internal snake_case `TraceSpan` into OTLP-shaped camelCase.
-    let spans: Vec<serde_json::Value> = raw.into_iter().map(|s| {
-        let attrs: Vec<serde_json::Value> = s.attributes.into_iter()
-            .map(|(k, v)| serde_json::json!({"key": k, "value": {"stringValue": v}}))
-            .collect();
-        serde_json::json!({
-            "traceId": s.trace_id,
-            "spanId": s.span_id,
-            "parentSpanId": s.parent_span_id,
-            "name": s.name,
-            "kind": s.kind,
-            "startTimeUnixNano": s.start_unix_nano,
-            "endTimeUnixNano": s.end_unix_nano,
-            "status": { "code": s.status_code },
-            "attributes": attrs,
+    let spans: Vec<serde_json::Value> = raw
+        .into_iter()
+        .map(|s| {
+            let attrs: Vec<serde_json::Value> = s
+                .attributes
+                .into_iter()
+                .map(|(k, v)| serde_json::json!({"key": k, "value": {"stringValue": v}}))
+                .collect();
+            serde_json::json!({
+                "traceId": s.trace_id,
+                "spanId": s.span_id,
+                "parentSpanId": s.parent_span_id,
+                "name": s.name,
+                "kind": s.kind,
+                "startTimeUnixNano": s.start_unix_nano,
+                "endTimeUnixNano": s.end_unix_nano,
+                "status": { "code": s.status_code },
+                "attributes": attrs,
+            })
         })
-    }).collect();
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "resourceSpans": [{
-            "resource": { "attributes": [{"key": "service.name", "value": "polyglotmesh"}] },
-            "scopeSpans": [{
-                "scope": { "name": "polyglotmesh.proxy" },
-                "spans": spans,
+        .collect();
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "resourceSpans": [{
+                "resource": { "attributes": [{"key": "service.name", "value": "polyglotmesh"}] },
+                "scopeSpans": [{
+                    "scope": { "name": "polyglotmesh.proxy" },
+                    "spans": spans,
+                }],
             }],
-        }],
-    }))).into_response()
+        })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
-pub struct TracesQuery { #[serde(default)] pub limit: Option<u32> }
-
+pub struct TracesQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
 
 /// GET /v1/admin/events/stream  — Server-Sent Events stream of every completed
 /// request. The dashboard uses this for the live-tail view.
@@ -849,11 +925,14 @@ pub fn spawn_budget_reset_task(state: SharedState) {
             // Snapshot the keys to avoid holding the auth lock across awaits.
             let keys: Vec<Arc<crate::auth::KeyRecord>> = state.auth.all_keys();
             for rec in keys {
-                if rec.max_budget.is_none() { continue; }
-                let dur = match crate::auth::parse_duration_to_chrono(rec.budget_duration.as_deref()) {
-                    Some(d) => d,
-                    None => continue,
-                };
+                if rec.max_budget.is_none() {
+                    continue;
+                }
+                let dur =
+                    match crate::auth::parse_duration_to_chrono(rec.budget_duration.as_deref()) {
+                        Some(d) => d,
+                        None => continue,
+                    };
                 let reset = {
                     let mut start = rec.budget_window_start.lock();
                     if now - *start > dur {
@@ -890,7 +969,11 @@ pub fn spawn_retention_task(state: SharedState) {
             if days > 0 {
                 let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86_400;
                 match state.storage.delete_events_older_than(cutoff) {
-                    Ok(n) if n > 0 => tracing::info!(rows = n, days, "pruned usage_events older than retention window"),
+                    Ok(n) if n > 0 => tracing::info!(
+                        rows = n,
+                        days,
+                        "pruned usage_events older than retention window"
+                    ),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("retention prune failed: {e}"),
                 }
@@ -916,7 +999,12 @@ pub fn spawn_config_watcher(state: SharedState) {
             // a potential config change and re-checks mtime before reloading.
             let mut w = notify::recommended_watcher(|res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
-                    if matches!(ev.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_) | notify::EventKind::Any) {
+                    if matches!(
+                        ev.kind,
+                        notify::EventKind::Modify(_)
+                            | notify::EventKind::Create(_)
+                            | notify::EventKind::Any
+                    ) {
                         if let Some(tx) = WATCHER_TX.get() {
                             let _ = tx.send(());
                         }
@@ -936,7 +1024,9 @@ pub fn spawn_config_watcher(state: SharedState) {
                 tracing::info!(file = %path.display(), "config watcher active (inotify/FSEvents)");
                 // Debounce: many editors emit several events per save.
                 loop {
-                    if rx.recv().await.is_none() { return; }
+                    if rx.recv().await.is_none() {
+                        return;
+                    }
                     // Drain duplicates.
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                     while rx.try_recv().is_ok() {}
@@ -951,7 +1041,9 @@ pub fn spawn_config_watcher(state: SharedState) {
                 tracing::warn!(error = %e, "inotify watcher unavailable; falling back to 2s stat() poll");
                 let mut last_mtime: Option<std::time::SystemTime> = None;
                 loop {
-                    let cur = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                    let cur = std::fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
                     if cur.is_some() && cur != last_mtime {
                         if last_mtime.is_some() {
                             tracing::info!(file = %path.display(), "config.toml changed; auto-reloading");
@@ -972,9 +1064,6 @@ pub fn spawn_config_watcher(state: SharedState) {
 use std::sync::OnceLock;
 static WATCHER_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<()>> = OnceLock::new();
 
-
-
-
 /// POST /v1/admin/metrics/reset
 /// Zero every in-memory counter, histogram, gauge, rate ring, and the trace ring.
 /// The SQLite `metric_samples` table (long-term totals) is intentionally NOT
@@ -988,16 +1077,22 @@ async fn admin_metrics_reset(
     state.metrics.reset();
     // Best-effort audit log; don't fail the request if the DB is read-only.
     let _ = state.storage.append_audit("metrics.reset", &actor, "");
-    (axum::http::StatusCode::OK, Json(serde_json::json!({
-        "ok": true,
-        "reset_at": chrono::Utc::now().timestamp(),
-        "actor": actor,
-    }))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "reset_at": chrono::Utc::now().timestamp(),
+            "actor": actor,
+        })),
+    )
+        .into_response()
 }
 
-
 #[derive(serde::Deserialize)]
-pub struct AuditQuery { #[serde(default)] pub limit: Option<u32> }
+pub struct AuditQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
 
 /// GET /v1/admin/audit?limit=N
 /// Newest-first list of audit events (key create/revoke, config reload,
@@ -1008,10 +1103,14 @@ async fn admin_audit(
 ) -> Response {
     let limit = q.limit.unwrap_or(100);
     match state.storage.recent_audit(limit) {
-        Ok(events) => (axum::http::StatusCode::OK, Json(serde_json::json!({
-            "events": events,
-            "count": events.len(),
-        }))).into_response(),
+        Ok(events) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "events": events,
+                "count": events.len(),
+            })),
+        )
+            .into_response(),
         Err(e) => crate::error::RouterError::Internal(e.to_string()).into_response(),
     }
 }

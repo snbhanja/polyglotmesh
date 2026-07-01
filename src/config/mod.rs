@@ -16,7 +16,8 @@ pub fn load_from_path<P: AsRef<Path>>(path: P) -> RouterResult<Config> {
         Ok(cfg)
     } else {
         // Default: TOML
-        let cfg: Config = toml::from_str(&raw).map_err(|e| RouterError::Internal(format!("toml parse: {e}")))?;
+        let cfg: Config =
+            toml::from_str(&raw).map_err(|e| RouterError::Internal(format!("toml parse: {e}")))?;
         Ok(cfg)
     }
 }
@@ -29,7 +30,8 @@ pub fn save_to_path<P: AsRef<Path>>(path: P, cfg: &Config) -> RouterResult<()> {
     let raw = if path.extension().and_then(|e| e.to_str()) == Some("json") {
         serde_json::to_string_pretty(cfg)?
     } else {
-        toml::to_string_pretty(cfg).map_err(|e| RouterError::Internal(format!("toml serialize: {e}")))?
+        toml::to_string_pretty(cfg)
+            .map_err(|e| RouterError::Internal(format!("toml serialize: {e}")))?
     };
     std::fs::write(path, raw)?;
     Ok(())

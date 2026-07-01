@@ -12,7 +12,6 @@ use std::time::Duration;
 pub type SharedState = Arc<AppState>;
 type StreamAccum = Arc<parking_lot::Mutex<Option<(u64, u64)>>>;
 
-
 /// Per-request timing record. Captures key timestamps so the dispatch path
 /// can emit one set of metric observations at the end.
 pub struct RequestTimer {
@@ -26,7 +25,14 @@ pub struct RequestTimer {
 
 impl RequestTimer {
     pub fn new(method: &'static str, model: Option<String>, stream: bool) -> Self {
-        Self { start: std::time::Instant::now(), upstream_start: None, first_byte: None, method, model, stream }
+        Self {
+            start: std::time::Instant::now(),
+            upstream_start: None,
+            first_byte: None,
+            method,
+            model,
+            stream,
+        }
     }
     /// Emit final metrics for this request. Safe to call from a Drop-style
     /// context (no awaits). `ok` true → success, false → error. For streams
@@ -45,7 +51,10 @@ impl RequestTimer {
         let total_us = self.start.elapsed().as_micros() as u64;
         state.metrics.request_duration.observe_us(total_us);
         if let Some(t) = self.upstream_start {
-            state.metrics.upstream_duration.observe_us(t.elapsed().as_micros() as u64);
+            state
+                .metrics
+                .upstream_duration
+                .observe_us(t.elapsed().as_micros() as u64);
         }
         if self.stream {
             if let Some(fb) = self.first_byte {
@@ -77,23 +86,44 @@ impl RequestTimer {
         // OTLP-shaped trace span
         let end_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u128;
         let start_ns = end_ns.saturating_sub((total_us as u128) * 1000);
-        let trace_id: String = (0..16).map(|j| format!("{:02x}", ((end_ns as u64).wrapping_shr((j % 8) * 8)) & 0xff)).collect();
-        let span_id: String = (0..8).map(|j| format!("{:02x}", ((end_ns as u64 ^ (j as u64 * 0xdeadbeef)) & 0xff))).collect();
+        let trace_id: String = (0..16)
+            .map(|j| format!("{:02x}", ((end_ns as u64).wrapping_shr((j % 8) * 8)) & 0xff))
+            .collect();
+        let span_id: String = (0..8)
+            .map(|j| format!("{:02x}", ((end_ns as u64 ^ (j as u64 * 0xdeadbeef)) & 0xff)))
+            .collect();
         let stream_flag = self.stream;
         state.metrics.record_trace(crate::metrics::TraceSpan {
-            name: format!("{} {kind} {model_str}", if stream_flag { "stream" } else { "request" }),
+            name: format!(
+                "{} {kind} {model_str}",
+                if stream_flag { "stream" } else { "request" }
+            ),
             trace_id: trace_id.clone(),
             span_id: span_id.clone(),
             parent_span_id: None,
             kind: "client".to_string(),
             start_unix_nano: start_ns,
             end_unix_nano: end_ns,
-            status_code: if ok { "ok".to_string() } else { "error".to_string() },
+            status_code: if ok {
+                "ok".to_string()
+            } else {
+                "error".to_string()
+            },
             attributes: vec![
                 ("http.method".to_string(), "POST".to_string()),
-                ("http.route".to_string(), if kind == "anthropic" { "/v1/messages".to_string() } else { "/v1/chat/completions".to_string() }),
+                (
+                    "http.route".to_string(),
+                    if kind == "anthropic" {
+                        "/v1/messages".to_string()
+                    } else {
+                        "/v1/chat/completions".to_string()
+                    },
+                ),
                 ("model".to_string(), model_str.to_string()),
-                ("upstream_id".to_string(), upstream_id.unwrap_or("").to_string()),
+                (
+                    "upstream_id".to_string(),
+                    upstream_id.unwrap_or("").to_string(),
+                ),
                 ("request.duration_us".to_string(), total_us.to_string()),
                 ("input.tokens".to_string(), in_t.to_string()),
                 ("output.tokens".to_string(), out_t.to_string()),
@@ -108,49 +138,87 @@ impl RequestTimer {
                 ("upstream_id", uid.to_string()),
                 ("model", model_str.to_string()),
             ];
-            state.metrics.request_duration_by_upstream.observe(label_vec.clone(), total_us);
+            state
+                .metrics
+                .request_duration_by_upstream
+                .observe(label_vec.clone(), total_us);
             if let Some(t) = self.upstream_start {
-                state.metrics.upstream_duration_by_upstream.observe(label_vec, t.elapsed().as_micros() as u64);
+                state
+                    .metrics
+                    .upstream_duration_by_upstream
+                    .observe(label_vec, t.elapsed().as_micros() as u64);
             }
         }
         // Labeled counters
         state.metrics.requests_total.inc(
-            vec![("method", kind.to_string()), ("model", model_str.to_string())], 1);
+            vec![
+                ("method", kind.to_string()),
+                ("model", model_str.to_string()),
+            ],
+            1,
+        );
         if upstream_id.is_some() {
             state.metrics.upstream_requests_total.inc(
-                vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                     ("model", model_str.to_string())], 1);
+                vec![
+                    ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                    ("model", model_str.to_string()),
+                ],
+                1,
+            );
         }
         if ok {
             state.metrics.success_total.inc(
-                vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                     ("model", model_str.to_string())], 1);
+                vec![
+                    ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                    ("model", model_str.to_string()),
+                ],
+                1,
+            );
             state.metrics.upstream_up.set(
-                vec![("upstream_id", upstream_id.unwrap_or("").to_string())], 1);
+                vec![("upstream_id", upstream_id.unwrap_or("").to_string())],
+                1,
+            );
             if in_t > 0 || out_t > 0 {
                 state.metrics.input_tokens_total.inc(
-                    vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                         ("model", model_str.to_string())], in_t);
+                    vec![
+                        ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                        ("model", model_str.to_string()),
+                    ],
+                    in_t,
+                );
                 state.metrics.output_tokens_total.inc(
-                    vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                         ("model", model_str.to_string())], out_t);
+                    vec![
+                        ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                        ("model", model_str.to_string()),
+                    ],
+                    out_t,
+                );
                 state.metrics.cost_micros_total.inc(
-                    vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                         ("model", model_str.to_string())], (cost_usd * 1_000_000.0) as u64);
+                    vec![
+                        ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                        ("model", model_str.to_string()),
+                    ],
+                    (cost_usd * 1_000_000.0) as u64,
+                );
             }
         } else {
             state.metrics.error_total.inc(
-                vec![("upstream_id", upstream_id.unwrap_or("").to_string()),
-                     ("model", model_str.to_string()),
-                     ("reason", status_label.to_string())], 1);
+                vec![
+                    ("upstream_id", upstream_id.unwrap_or("").to_string()),
+                    ("model", model_str.to_string()),
+                    ("reason", status_label.to_string()),
+                ],
+                1,
+            );
             state.metrics.upstream_up.set(
-                vec![("upstream_id", upstream_id.unwrap_or("").to_string())], 0);
+                vec![("upstream_id", upstream_id.unwrap_or("").to_string())],
+                0,
+            );
         }
     }
 }
 
 type StreamUsage = (Response, Option<(u64, u64, f64)>, Option<StreamAccum>);
-
 
 /// Auth middleware: validates the key and enforces per-key rpm/tpm/parallel limits.
 /// The full `KeyRecord` is stashed in a request extension for downstream handlers.
@@ -171,7 +239,11 @@ fn get_key_from_parts(parts: &axum::http::request::Parts) -> Option<Arc<KeyRecor
     parts.extensions.get::<Arc<KeyRecord>>().cloned()
 }
 
-fn check_key_authorization(rec: &KeyRecord, model: Option<&str>, kind: crate::config::types::ProviderKind) -> bool {
+fn check_key_authorization(
+    rec: &KeyRecord,
+    model: Option<&str>,
+    kind: crate::config::types::ProviderKind,
+) -> bool {
     if rec.blocked {
         return false;
     }
@@ -203,9 +275,11 @@ fn read_stream_requested(headers: &HeaderMap, body: &[u8]) -> bool {
 }
 
 fn read_model(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()))
+    serde_json::from_slice::<Value>(body).ok().and_then(|v| {
+        v.get("model")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
+    })
 }
 
 fn rewrite_model(body: &mut Vec<u8>, model: &str) {
@@ -220,7 +294,11 @@ fn rewrite_model(body: &mut Vec<u8>, model: &str) {
 }
 
 /// Extract input/output token counts and USD cost from an upstream JSON response body.
-fn extract_usage(body: &[u8], upstream: &Arc<crate::upstream::Upstream>, model: Option<&str>) -> (u64, u64, f64) {
+fn extract_usage(
+    body: &[u8],
+    upstream: &Arc<crate::upstream::Upstream>,
+    model: Option<&str>,
+) -> (u64, u64, f64) {
     let v: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (0, 0, 0.0),
@@ -266,7 +344,6 @@ fn build_response(status: StatusCode, headers: HeaderMap, body: Body) -> Respons
 
 /// Wraps an SSE byte stream so the caller can read the final usage tokens after the stream finishes.
 /// `accum` starts as None and is filled in once the first `usage` JSON object is seen in a chunk.
-
 /// For stream responses, the usage comes in late SSE chunks. We spawn a watcher task
 /// that polls the accumulator (filled in by `upstream_stream_body` as bytes flow through)
 /// and once it sees a usage object, computes cost and records into the storage layer.
@@ -284,15 +361,29 @@ pub fn spawn_stream_usage_watcher(
         loop {
             {
                 let g = accum.lock();
-                if g.is_some() { break; }
+                if g.is_some() {
+                    break;
+                }
             }
-            if tokio::time::Instant::now() > deadline { return; }
+            if tokio::time::Instant::now() > deadline {
+                return;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
         let (in_t, out_t) = accum.lock().unwrap_or((0, 0));
-        if in_t == 0 && out_t == 0 { return; }
+        if in_t == 0 && out_t == 0 {
+            return;
+        }
         let (cost, _unknown) = upstream.cost_for(model.as_deref(), in_t, out_t);
-        state.record_key_usage(&key, in_t, out_t, cost, Some(&upstream_id), model.as_deref(), 200);
+        state.record_key_usage(
+            &key,
+            in_t,
+            out_t,
+            cost,
+            Some(&upstream_id),
+            model.as_deref(),
+            200,
+        );
     });
 }
 
@@ -358,25 +449,54 @@ fn extract_usage_from_sse(
     let mut found = cur.is_some();
     for line in text.split('\n') {
         let line = line.trim();
-        if line.is_empty() { continue; }
-        let payload = if let Some(p) = line.strip_prefix("data: ") { p } else { continue; };
-        if payload == "[DONE]" { continue; }
-        let v: Value = match serde_json::from_str(payload) { Ok(v) => v, Err(_) => continue };
+        if line.is_empty() {
+            continue;
+        }
+        let payload = if let Some(p) = line.strip_prefix("data: ") {
+            p
+        } else {
+            continue;
+        };
+        if payload == "[DONE]" {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         // OpenAI chat.completion.chunk: { usage: { prompt_tokens, completion_tokens } } (when include_usage)
         if let Some(u) = v.get("usage") {
-            if let Some(i) = u.get("prompt_tokens").and_then(|x| x.as_u64()) { in_t = in_t.max(i); found = true; }
-            if let Some(o) = u.get("completion_tokens").and_then(|x| x.as_u64()) { out_t = out_t.max(o); found = true; }
+            if let Some(i) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
+                in_t = in_t.max(i);
+                found = true;
+            }
+            if let Some(o) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
+                out_t = out_t.max(o);
+                found = true;
+            }
         }
         // Anthropic message_delta: { usage: { output_tokens } }
         if let Some(u) = v.get("usage") {
-            if let Some(i) = u.get("input_tokens").and_then(|x| x.as_u64()) { in_t = in_t.max(i); found = true; }
-            if let Some(o) = u.get("output_tokens").and_then(|x| x.as_u64()) { out_t = out_t.max(o); found = true; }
+            if let Some(i) = u.get("input_tokens").and_then(|x| x.as_u64()) {
+                in_t = in_t.max(i);
+                found = true;
+            }
+            if let Some(o) = u.get("output_tokens").and_then(|x| x.as_u64()) {
+                out_t = out_t.max(o);
+                found = true;
+            }
         }
         // Anthropic message_start: { message: { usage: { input_tokens } } }
         if let Some(msg) = v.get("message") {
             if let Some(u) = msg.get("usage") {
-                if let Some(i) = u.get("input_tokens").and_then(|x| x.as_u64()) { in_t = in_t.max(i); found = true; }
-                if let Some(o) = u.get("output_tokens").and_then(|x| x.as_u64()) { out_t = out_t.max(o); found = true; }
+                if let Some(i) = u.get("input_tokens").and_then(|x| x.as_u64()) {
+                    in_t = in_t.max(i);
+                    found = true;
+                }
+                if let Some(o) = u.get("output_tokens").and_then(|x| x.as_u64()) {
+                    out_t = out_t.max(o);
+                    found = true;
+                }
             }
         }
     }
@@ -388,19 +508,21 @@ fn extract_usage_from_sse(
 
 // ---- OpenAI ----
 
-pub async fn openai_chat_completions(
-    State(state): State<SharedState>,
-    req: Request,
-) -> Response {
+pub async fn openai_chat_completions(State(state): State<SharedState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
-        Err(e) => return crate::error::RouterError::BadRequest(format!("read body: {e}")).into_response(),
+        Err(e) => {
+            return crate::error::RouterError::BadRequest(format!("read body: {e}")).into_response()
+        }
     };
     let key = get_key_from_parts(&parts);
     if let Some(k) = &key {
         if !check_key_authorization(k, None, crate::config::types::ProviderKind::Openai) {
-            return crate::error::RouterError::Unauthorized("key not allowed for this provider/model".into()).into_response();
+            return crate::error::RouterError::Unauthorized(
+                "key not allowed for this provider/model".into(),
+            )
+            .into_response();
         }
     }
     let requested_model = read_model(&body_bytes);
@@ -409,7 +531,15 @@ pub async fn openai_chat_completions(
     let key2 = key.clone();
     let parts2 = parts;
     let body2 = body_bytes;
-    let resp = dispatch_openai(&state2, &parts2.headers, &body2, requested_model.as_deref(), stream, key2.as_ref()).await;
+    let resp = dispatch_openai(
+        &state2,
+        &parts2.headers,
+        &body2,
+        requested_model.as_deref(),
+        stream,
+        key2.as_ref(),
+    )
+    .await;
     if let Some(k) = &key2 {
         if let Ok((_r, usage)) = &resp {
             if let Some((in_t, out_t, cost)) = usage {
@@ -434,7 +564,10 @@ pub async fn openai_chat_completions(
 
 pub async fn openai_list_models(State(state): State<SharedState>) -> Response {
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for u in state.registry.by_provider(crate::config::types::ProviderKind::Openai) {
+    for u in state
+        .registry
+        .by_provider(crate::config::types::ProviderKind::Openai)
+    {
         let cfg = u.cfg.read();
         for m in &cfg.models {
             set.insert(m.clone());
@@ -460,14 +593,20 @@ pub async fn openai_list_models(State(state): State<SharedState>) -> Response {
             })
         })
         .collect();
-    (StatusCode::OK, axum::Json(serde_json::json!({ "object": "list", "data": data }))).into_response()
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "object": "list", "data": data })),
+    )
+        .into_response()
 }
 
 pub async fn openai_get_model(
     State(state): State<SharedState>,
     Path(model): Path<String>,
 ) -> Response {
-    let upstreams = state.registry.by_provider(crate::config::types::ProviderKind::Openai);
+    let upstreams = state
+        .registry
+        .by_provider(crate::config::types::ProviderKind::Openai);
     let found = upstreams
         .iter()
         .any(|u| u.cfg.read().models.iter().any(|m| m == &model));
@@ -500,45 +639,94 @@ async fn dispatch_openai(
 ) -> Result<(Response, Option<(u64, u64, f64)>), crate::error::RouterError> {
     let mut body_owned = body.to_vec();
     if let Some(model) = requested_model {
-        if let Some(rewritten) = state.resolve_alias(model, crate::config::types::ProviderKind::Openai) {
+        if let Some(rewritten) =
+            state.resolve_alias(model, crate::config::types::ProviderKind::Openai)
+        {
             rewrite_model(&mut body_owned, &rewritten);
         }
     }
-    let upstreams = state.registry.by_provider(crate::config::types::ProviderKind::Openai);
+    let upstreams = state
+        .registry
+        .by_provider(crate::config::types::ProviderKind::Openai);
     let upstreams = filter_upstreams_for_model(&upstreams, requested_model);
     if upstreams.is_empty() {
-        return Err(crate::error::RouterError::NoHealthyUpstream("openai".into()));
+        return Err(crate::error::RouterError::NoHealthyUpstream(
+            "openai".into(),
+        ));
     }
     let mut timer = RequestTimer::new("openai", requested_model.map(|s| s.to_string()), stream);
-    state.metrics.active_requests.inc(vec![("method", "openai".to_string())]);
-    if stream { state.metrics.active_streams.inc(vec![("method", "openai".to_string())]); }
+    state
+        .metrics
+        .active_requests
+        .inc(vec![("method", "openai".to_string())]);
+    if stream {
+        state
+            .metrics
+            .active_streams
+            .inc(vec![("method", "openai".to_string())]);
+    }
     let upstream = state
         .queue
         .acquire(upstreams, crate::config::types::ProviderKind::Openai)
         .await?;
     timer.upstream_start = Some(std::time::Instant::now());
-    let result = forward_openai(state, &upstream, headers, &body_owned, stream, requested_model).await;
+    let result = forward_openai(
+        state,
+        &upstream,
+        headers,
+        &body_owned,
+        stream,
+        requested_model,
+    )
+    .await;
     upstream.release();
     let success = result.is_ok();
     if success {
         upstream.record_success();
         if stream {
             if let (Ok((_, _, Some(accum))), Some(k)) = (&result, key) {
-                spawn_stream_usage_watcher(state.clone(), k.clone(), accum.clone(), upstream.clone(), requested_model.map(|s| s.to_string()));
+                spawn_stream_usage_watcher(
+                    state.clone(),
+                    k.clone(),
+                    accum.clone(),
+                    upstream.clone(),
+                    requested_model.map(|s| s.to_string()),
+                );
             }
         }
     } else {
         upstream.record_failure();
     }
-    state.metrics.active_requests.dec(vec![("method", "openai".to_string())]);
-    if stream { state.metrics.active_streams.dec(vec![("method", "openai".to_string())]); }
+    state
+        .metrics
+        .active_requests
+        .dec(vec![("method", "openai".to_string())]);
+    if stream {
+        state
+            .metrics
+            .active_streams
+            .dec(vec![("method", "openai".to_string())]);
+    }
     // Pull token/cost info if available, and finalize metrics.
-    let usage = result.as_ref().ok().and_then(|(_, u, _)| u.as_ref()).copied().unwrap_or((0, 0, 0.0));
+    let usage = result
+        .as_ref()
+        .ok()
+        .and_then(|(_, u, _)| u.as_ref())
+        .copied()
+        .unwrap_or((0, 0, 0.0));
     let in_t = usage.0;
     let out_t = usage.1;
     let cost = usage.2;
     let reason = if success { "ok" } else { "upstream_error" };
-    timer.finalize(state, Some(&upstream.id()), success, reason, in_t, out_t, cost);
+    timer.finalize(
+        state,
+        Some(&upstream.id()),
+        success,
+        reason,
+        in_t,
+        out_t,
+        cost,
+    );
     // Collapse the 3-tuple back to 2-tuple for the handler.
     result.map(|(r, u, _)| (r, u))
 }
@@ -590,33 +778,51 @@ async fn forward_openai(
             upstream.id(),
             std::time::Instant::now(),
         );
-        return Ok((build_response(status, out_headers, body), Some((0, 0, 0.0)), Some(accum)));
+        return Ok((
+            build_response(status, out_headers, body),
+            Some((0, 0, 0.0)),
+            Some(accum),
+        ));
     }
     let bytes = resp.bytes().await?;
     let usage = extract_usage(&bytes, upstream, requested_model);
-    Ok((build_response(status, out_headers, Body::from(bytes)), Some(usage), None))
+    Ok((
+        build_response(status, out_headers, Body::from(bytes)),
+        Some(usage),
+        None,
+    ))
 }
 
 // ---- Anthropic ----
 
-pub async fn anthropic_messages(
-    State(state): State<SharedState>,
-    req: Request,
-) -> Response {
+pub async fn anthropic_messages(State(state): State<SharedState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
-        Err(e) => return crate::error::RouterError::BadRequest(format!("read body: {e}")).into_response(),
+        Err(e) => {
+            return crate::error::RouterError::BadRequest(format!("read body: {e}")).into_response()
+        }
     };
     let key = get_key_from_parts(&parts);
     if let Some(k) = &key {
         if !check_key_authorization(k, None, crate::config::types::ProviderKind::Anthropic) {
-            return crate::error::RouterError::Unauthorized("key not allowed for this provider/model".into()).into_response();
+            return crate::error::RouterError::Unauthorized(
+                "key not allowed for this provider/model".into(),
+            )
+            .into_response();
         }
     }
     let requested_model = read_model(&body_bytes);
     let stream = read_stream_requested(&parts.headers, &body_bytes);
-    let resp = dispatch_anthropic(&state, &parts.headers, &body_bytes, requested_model.as_deref(), stream, key.as_ref()).await;
+    let resp = dispatch_anthropic(
+        &state,
+        &parts.headers,
+        &body_bytes,
+        requested_model.as_deref(),
+        stream,
+        key.as_ref(),
+    )
+    .await;
     if let Some(k) = &key {
         if let Ok((_r, usage)) = &resp {
             if let Some((in_t, out_t, cost)) = usage {
@@ -649,44 +855,93 @@ async fn dispatch_anthropic(
 ) -> Result<(Response, Option<(u64, u64, f64)>), crate::error::RouterError> {
     let mut body_owned = body.to_vec();
     if let Some(model) = requested_model {
-        if let Some(rewritten) = state.resolve_alias(model, crate::config::types::ProviderKind::Anthropic) {
+        if let Some(rewritten) =
+            state.resolve_alias(model, crate::config::types::ProviderKind::Anthropic)
+        {
             rewrite_model(&mut body_owned, &rewritten);
         }
     }
-    let upstreams = state.registry.by_provider(crate::config::types::ProviderKind::Anthropic);
+    let upstreams = state
+        .registry
+        .by_provider(crate::config::types::ProviderKind::Anthropic);
     let upstreams = filter_upstreams_for_model(&upstreams, requested_model);
     if upstreams.is_empty() {
-        return Err(crate::error::RouterError::NoHealthyUpstream("anthropic".into()));
+        return Err(crate::error::RouterError::NoHealthyUpstream(
+            "anthropic".into(),
+        ));
     }
     let mut timer = RequestTimer::new("anthropic", requested_model.map(|s| s.to_string()), stream);
-    state.metrics.active_requests.inc(vec![("method", "anthropic".to_string())]);
-    if stream { state.metrics.active_streams.inc(vec![("method", "anthropic".to_string())]); }
+    state
+        .metrics
+        .active_requests
+        .inc(vec![("method", "anthropic".to_string())]);
+    if stream {
+        state
+            .metrics
+            .active_streams
+            .inc(vec![("method", "anthropic".to_string())]);
+    }
     let upstream = state
         .queue
         .acquire(upstreams, crate::config::types::ProviderKind::Anthropic)
         .await?;
     timer.upstream_start = Some(std::time::Instant::now());
-    let result = forward_anthropic(state, &upstream, headers, &body_owned, stream, requested_model).await;
+    let result = forward_anthropic(
+        state,
+        &upstream,
+        headers,
+        &body_owned,
+        stream,
+        requested_model,
+    )
+    .await;
     upstream.release();
     let success = result.is_ok();
     if success {
         upstream.record_success();
         if stream {
             if let (Ok((_, _, Some(accum))), Some(k)) = (&result, key) {
-                spawn_stream_usage_watcher(state.clone(), k.clone(), accum.clone(), upstream.clone(), requested_model.map(|s| s.to_string()));
+                spawn_stream_usage_watcher(
+                    state.clone(),
+                    k.clone(),
+                    accum.clone(),
+                    upstream.clone(),
+                    requested_model.map(|s| s.to_string()),
+                );
             }
         }
     } else {
         upstream.record_failure();
     }
-    state.metrics.active_requests.dec(vec![("method", "anthropic".to_string())]);
-    if stream { state.metrics.active_streams.dec(vec![("method", "anthropic".to_string())]); }
-    let usage = result.as_ref().ok().and_then(|(_, u, _)| u.as_ref()).copied().unwrap_or((0, 0, 0.0));
+    state
+        .metrics
+        .active_requests
+        .dec(vec![("method", "anthropic".to_string())]);
+    if stream {
+        state
+            .metrics
+            .active_streams
+            .dec(vec![("method", "anthropic".to_string())]);
+    }
+    let usage = result
+        .as_ref()
+        .ok()
+        .and_then(|(_, u, _)| u.as_ref())
+        .copied()
+        .unwrap_or((0, 0, 0.0));
     let in_t = usage.0;
     let out_t = usage.1;
     let cost = usage.2;
     let reason = if success { "ok" } else { "upstream_error" };
-    timer.finalize(state, Some(&upstream.id()), success, reason, in_t, out_t, cost);
+    timer.finalize(
+        state,
+        Some(&upstream.id()),
+        success,
+        reason,
+        in_t,
+        out_t,
+        cost,
+    );
     result.map(|(r, u, _)| (r, u))
 }
 
@@ -739,11 +994,19 @@ async fn forward_anthropic(
             upstream.id(),
             std::time::Instant::now(),
         );
-        return Ok((build_response(status, out_headers, body), Some((0, 0, 0.0)), Some(accum)));
+        return Ok((
+            build_response(status, out_headers, body),
+            Some((0, 0, 0.0)),
+            Some(accum),
+        ));
     }
     let bytes = resp.bytes().await?;
     let usage = extract_usage(&bytes, upstream, requested_model);
-    Ok((build_response(status, out_headers, Body::from(bytes)), Some(usage), None))
+    Ok((
+        build_response(status, out_headers, Body::from(bytes)),
+        Some(usage),
+        None,
+    ))
 }
 
 pub async fn health(State(state): State<SharedState>) -> Response {

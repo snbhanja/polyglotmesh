@@ -59,7 +59,9 @@ impl IntoResponse for RouterError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             RouterError::UpstreamNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            RouterError::NoHealthyUpstream(_) => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            RouterError::NoHealthyUpstream(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             RouterError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             RouterError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
             RouterError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
@@ -73,10 +75,12 @@ impl IntoResponse for RouterError {
         };
 
         let body = match &self {
-            RouterError::UpstreamHttp { body, .. } => match serde_json::from_str::<serde_json::Value>(body) {
-                Ok(v) => v,
-                Err(_) => json!({ "error": { "message": message, "type": "upstream_error" } }),
-            },
+            RouterError::UpstreamHttp { body, .. } => {
+                match serde_json::from_str::<serde_json::Value>(body) {
+                    Ok(v) => v,
+                    Err(_) => json!({ "error": { "message": message, "type": "upstream_error" } }),
+                }
+            }
             _ => json!({ "error": { "message": message, "type": "router_error" } }),
         };
 

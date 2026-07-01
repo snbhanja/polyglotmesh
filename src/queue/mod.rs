@@ -92,7 +92,8 @@ impl QueueManager {
         {
             let mut map = self.pending_waits.lock();
             let cur = *map.get(&kind).unwrap_or(&0);
-            if self.cfg.max_queue_per_provider > 0 && cur >= self.cfg.max_queue_per_provider as u64 {
+            if self.cfg.max_queue_per_provider > 0 && cur >= self.cfg.max_queue_per_provider as u64
+            {
                 self.stats.total_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(RouterError::NoHealthyUpstream(format!(
                     "{} (queue full: {} waiting)",

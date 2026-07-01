@@ -1,6 +1,6 @@
 [package]
 name = "polyglotmesh"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "polyglotmesh — a single OpenAI/Anthropic-compatible base URL in front of many LLM providers, with priority routing, per-key limits, queueing, and built-in observability."
 license = "MIT"

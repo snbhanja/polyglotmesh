@@ -124,7 +124,8 @@ impl Upstream {
             return false;
         }
         let cfg = self.cfg.read();
-        if cfg.max_concurrency > 0 && self.in_flight.load(Ordering::Relaxed) >= cfg.max_concurrency {
+        if cfg.max_concurrency > 0 && self.in_flight.load(Ordering::Relaxed) >= cfg.max_concurrency
+        {
             return false;
         }
         true
@@ -189,7 +190,6 @@ impl Upstream {
     pub fn record_failure(&self) {
         self.failure_count.fetch_add(1, Ordering::Relaxed);
         let f = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        let cfg = self.cfg.read();
         let threshold = std::env::var("AI_LLM_ROUTER_FAIL_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -199,7 +199,6 @@ impl Upstream {
         } else if f >= (threshold / 2 + 1) {
             *self.health.write() = Health::Degraded;
         }
-        let _ = cfg; // keep read scope
     }
 
     pub fn snapshot(&self) -> serde_json::Value {
@@ -287,7 +286,8 @@ impl UpstreamRegistry {
     }
 
     fn rebuild_by_provider(&self) {
-        let mut all: Vec<Arc<Upstream>> = self.upstreams.iter().map(|e| e.value().clone()).collect();
+        let mut all: Vec<Arc<Upstream>> =
+            self.upstreams.iter().map(|e| e.value().clone()).collect();
         // Higher priority first, then lower id for stability.
         all.sort_by(|a, b| {
             b.priority()
@@ -319,7 +319,12 @@ impl Upstream {
     /// First checks the per-upstream `model_info` override; falls back to the
     /// built-in default pricing table for popular models. Returns 0.0 if no
     /// price is known (callers can then surface it as `cost_unknown: true`).
-    pub fn cost_for(&self, model: Option<&str>, input_tokens: u64, output_tokens: u64) -> (f64, bool) {
+    pub fn cost_for(
+        &self,
+        model: Option<&str>,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> (f64, bool) {
         let cfg = self.cfg.read();
         let name = model.unwrap_or("");
         if let Some(c) = cfg.model_info.get(name) {
@@ -338,7 +343,9 @@ impl Upstream {
         let cfg = self.cfg.read();
         let mut out: Vec<String> = cfg.models.clone();
         for k in cfg.model_info.keys() {
-            if !out.contains(k) { out.push(k.clone()); }
+            if !out.contains(k) {
+                out.push(k.clone());
+            }
         }
         out.sort();
         out
@@ -470,14 +477,18 @@ impl Upstream {
     ) {
         let mut cfg = self.cfg.write();
         if merge {
-            for (k, v) in prices { cfg.model_info.insert(k, v); }
+            for (k, v) in prices {
+                cfg.model_info.insert(k, v);
+            }
         } else {
             cfg.model_info = prices;
         }
     }
 
     /// Read-only view of the current pricing map (for the admin endpoint).
-    pub fn model_info(&self) -> std::collections::BTreeMap<String, crate::config::types::ModelCost> {
+    pub fn model_info(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::config::types::ModelCost> {
         self.cfg.read().model_info.clone()
     }
 }

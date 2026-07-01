@@ -1,8 +1,8 @@
 use crate::auth::{AuthStore, KeyRecord};
 use crate::config::types::{Config, ModelAliasEntry, ProviderKind};
 use crate::error::RouterResult;
-use crate::queue::QueueManager;
 use crate::metrics::Metrics;
+use crate::queue::QueueManager;
 use crate::storage::Storage;
 use crate::upstream::UpstreamRegistry;
 use std::sync::Arc;
@@ -22,11 +22,10 @@ impl AppState {
     pub fn from_config(cfg: Config) -> Self {
         let paths = crate::config::RouterPaths::discover();
         let storage = Arc::new(
-            Storage::open(paths.state_file.with_extension("db"))
-                .unwrap_or_else(|e| {
-                    tracing::warn!("storage open failed: {e}; falling back to in-memory");
-                    Storage::open_in_memory().expect("in-memory storage")
-                }),
+            Storage::open(paths.state_file.with_extension("db")).unwrap_or_else(|e| {
+                tracing::warn!("storage open failed: {e}; falling back to in-memory");
+                Storage::open_in_memory().expect("in-memory storage")
+            }),
         );
 
         let queue = Arc::new(QueueManager::new(cfg.queue.clone()));
@@ -106,7 +105,10 @@ impl AppState {
                 }
             }
         }
-        let _ = ModelAliasEntry { upstream_id: String::new(), upstream_model: String::new() };
+        let _ = ModelAliasEntry {
+            upstream_id: String::new(),
+            upstream_model: String::new(),
+        };
         None
     }
 
@@ -156,14 +158,24 @@ impl AppState {
 
 fn restore_usage(rec: &Arc<KeyRecord>, row: &crate::storage::KeyUsageRow) {
     use std::sync::atomic::Ordering;
-    rec.usage.total_requests.store(row.total_requests, Ordering::Relaxed);
-    rec.usage.total_input_tokens.store(row.total_input_tokens, Ordering::Relaxed);
-    rec.usage.total_output_tokens.store(row.total_output_tokens, Ordering::Relaxed);
+    rec.usage
+        .total_requests
+        .store(row.total_requests, Ordering::Relaxed);
+    rec.usage
+        .total_input_tokens
+        .store(row.total_input_tokens, Ordering::Relaxed);
+    rec.usage
+        .total_output_tokens
+        .store(row.total_output_tokens, Ordering::Relaxed);
     let micros = (row.total_spend_usd * 1_000_000.0) as u64;
     rec.usage.total_spend_usd.store(micros, Ordering::Relaxed);
     rec.usage.in_flight.store(row.in_flight, Ordering::Relaxed);
-    rec.usage.rpm_window_count.store(row.rpm_window_count, Ordering::Relaxed);
-    rec.usage.tpm_window_tokens.store(row.tpm_window_tokens, Ordering::Relaxed);
+    rec.usage
+        .rpm_window_count
+        .store(row.rpm_window_count, Ordering::Relaxed);
+    rec.usage
+        .tpm_window_tokens
+        .store(row.tpm_window_tokens, Ordering::Relaxed);
     {
         let mut s = rec.usage.rpm_window_start.lock();
         let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(row.rpm_window_start, 0)
@@ -241,13 +253,15 @@ impl AppState {
     /// Release the in-flight slot and persist the new count.
     pub fn release_key(&self, rec: &crate::auth::KeyRecord) {
         crate::auth::release(rec);
-        let cur = rec.usage.in_flight.load(std::sync::atomic::Ordering::Relaxed);
+        let cur = rec
+            .usage
+            .in_flight
+            .load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = self.storage.set_in_flight(&rec.alias, cur as i64) {
             tracing::debug!("in_flight persist failed for {}: {e}", rec.alias);
         }
     }
 }
-
 
 /// Replay persisted `metric_samples` rows back into the in-memory `Metrics`.
 /// Counters restore their absolute value (overwriting); histogram bucket
@@ -265,42 +279,88 @@ fn metrics_restore(m: &Arc<Metrics>, rows: &[crate::storage::MetricSampleRow]) -
             .collect();
         let v = r.value as u64;
         match r.name.as_str() {
-            "requests_total" => m.requests_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "requests_total" => m
+                .requests_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "upstream_requests_total" => m.upstream_requests_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "upstream_requests_total" => m
+                .upstream_requests_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "success_total" => m.success_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "success_total" => m
+                .success_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "error_total" => m.error_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "error_total" => m
+                .error_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "input_tokens_total" => m.input_tokens_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "input_tokens_total" => m
+                .input_tokens_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "output_tokens_total" => m.output_tokens_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "output_tokens_total" => m
+                .output_tokens_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "cost_micros_total" => m.cost_micros_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "cost_micros_total" => m
+                .cost_micros_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "cache_read_input_tokens_total" => m.cache_read_input_tokens_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "cache_read_input_tokens_total" => m
+                .cache_read_input_tokens_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
-            "cache_write_input_tokens_total" => m.cache_write_input_tokens_total.values.write()
-                .entry(labels_static).or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            "cache_write_input_tokens_total" => m
+                .cache_write_input_tokens_total
+                .values
+                .write()
+                .entry(labels_static)
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
                 .store(v, std::sync::atomic::Ordering::Relaxed),
             // Histogram bucket counts: label encodes the le_us boundary.
-            "request_duration_seconds_bucket" => restore_histogram(&m.request_duration, &labels_static, v),
-            "upstream_duration_seconds_bucket" => restore_histogram(&m.upstream_duration, &labels_static, v),
+            "request_duration_seconds_bucket" => {
+                restore_histogram(&m.request_duration, &labels_static, v)
+            }
+            "upstream_duration_seconds_bucket" => {
+                restore_histogram(&m.upstream_duration, &labels_static, v)
+            }
             "time_to_first_token_seconds_bucket" => restore_histogram(&m.ttft, &labels_static, v),
-            "stream_inter_token_seconds_bucket" => restore_histogram(&m.inter_token, &labels_static, v),
+            "stream_inter_token_seconds_bucket" => {
+                restore_histogram(&m.inter_token, &labels_static, v)
+            }
             n if n.starts_with("_hist_sum::") || n.starts_with("_hist_count::") => {
                 let v = r.value as u64;
                 let is_sum = r.name.starts_with("_hist_sum::");
-                let path = if is_sum { &n["_hist_sum::".len()..] } else { &n["_hist_count::".len()..] };
+                let path = if is_sum {
+                    &n["_hist_sum::".len()..]
+                } else {
+                    &n["_hist_count::".len()..]
+                };
                 let ord = std::sync::atomic::Ordering::Relaxed;
                 match (is_sum, path) {
                     (true, "request_duration_seconds") => m.request_duration.sum_us.store(v, ord),
@@ -320,7 +380,11 @@ fn metrics_restore(m: &Arc<Metrics>, rows: &[crate::storage::MetricSampleRow]) -
     Ok(())
 }
 
-fn restore_histogram(h: &crate::metrics::Histogram, labels: &[(&'static str, String)], cumulative_v: u64) {
+fn restore_histogram(
+    h: &crate::metrics::Histogram,
+    labels: &[(&'static str, String)],
+    cumulative_v: u64,
+) {
     // Persisted values are cumulative. Convert to per-bucket delta and store.
     if let Some((_, le_str)) = labels.first() {
         if let Ok(le) = le_str.parse::<usize>() {

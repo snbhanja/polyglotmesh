@@ -127,14 +127,20 @@ impl Storage {
         let conn = Connection::open(&path).map_err(sqlite_err)?;
         // Apply schema (idempotent CREATE IF NOT EXISTS).
         conn.execute_batch(SCHEMA).map_err(sqlite_err)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), path })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path,
+        })
     }
 
     /// In-memory only (for tests).
     pub fn open_in_memory() -> RouterResult<Self> {
         let conn = Connection::open_in_memory().map_err(sqlite_err)?;
         conn.execute_batch(SCHEMA).map_err(sqlite_err)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: PathBuf::from(":memory:") })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path: PathBuf::from(":memory:"),
+        })
     }
 
     /// Upsert an API key (raw token, role, full config JSON).
@@ -160,7 +166,10 @@ impl Storage {
     }
 
     pub fn upsert_api_key(&self, raw: &str, cfg: &ApiKeyConfig) -> RouterResult<()> {
-        let alias = cfg.key_alias.clone().unwrap_or_else(|| raw.chars().take(12).collect::<String>() + "…");
+        let alias = cfg
+            .key_alias
+            .clone()
+            .unwrap_or_else(|| raw.chars().take(12).collect::<String>() + "…");
         let role = cfg.role.clone();
         let config_json = serde_json::to_string(cfg)?;
         let raw_hash = crate::auth::hash(raw);
@@ -365,8 +374,11 @@ impl Storage {
     pub fn update_rpm_window(&self, alias: &str, window_seconds: i64) -> RouterResult<(i64, u32)> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(sqlite_err)?;
-        tx.execute("INSERT OR IGNORE INTO key_usage (alias) VALUES (?1)", params![alias])
-            .map_err(sqlite_err)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO key_usage (alias) VALUES (?1)",
+            params![alias],
+        )
+        .map_err(sqlite_err)?;
         let now = now_unix();
         // Read current
         let (start, count): (i64, i64) = tx
@@ -390,11 +402,19 @@ impl Storage {
         Ok((new_start, new_count as u32))
     }
 
-    pub fn update_tpm_window(&self, alias: &str, delta_tokens: u32, window_seconds: i64) -> RouterResult<(i64, u32)> {
+    pub fn update_tpm_window(
+        &self,
+        alias: &str,
+        delta_tokens: u32,
+        window_seconds: i64,
+    ) -> RouterResult<(i64, u32)> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(sqlite_err)?;
-        tx.execute("INSERT OR IGNORE INTO key_usage (alias) VALUES (?1)", params![alias])
-            .map_err(sqlite_err)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO key_usage (alias) VALUES (?1)",
+            params![alias],
+        )
+        .map_err(sqlite_err)?;
         let now = now_unix();
         let (start, count): (i64, i64) = tx
             .query_row(
@@ -446,7 +466,10 @@ impl Storage {
     pub fn delete_events_older_than(&self, cutoff_unix: i64) -> RouterResult<u64> {
         let conn = self.conn.lock();
         let n = conn
-            .execute("DELETE FROM usage_events WHERE at < ?1", params![cutoff_unix])
+            .execute(
+                "DELETE FROM usage_events WHERE at < ?1",
+                params![cutoff_unix],
+            )
             .map_err(sqlite_err)?;
         // VACUUM-lite: leave the freed pages to the next checkpoint, but run a manual
         // WAL checkpoint so disk usage doesn't grow without bound.
@@ -542,16 +565,20 @@ pub struct UsageBucket {
 /// Group `usage_events` rows by the chosen dimension, optionally limited to a time window.
 pub fn usage_aggregation(
     conn: &rusqlite::Connection,
-    group_by: &str,           // "alias" | "upstream" | "model" | "all"
-    since_unix: Option<i64>,  // inclusive lower bound
-    until_unix: Option<i64>,  // exclusive upper bound
+    group_by: &str,          // "alias" | "upstream" | "model" | "all"
+    since_unix: Option<i64>, // inclusive lower bound
+    until_unix: Option<i64>, // exclusive upper bound
 ) -> RouterResult<Vec<UsageBucket>> {
     let col = match group_by {
         "alias" => "alias",
         "upstream" => "upstream_id",
         "model" => "model",
         "all" => "NULL",
-        other => return Err(crate::error::RouterError::BadRequest(format!("invalid group_by '{other}'"))),
+        other => {
+            return Err(crate::error::RouterError::BadRequest(format!(
+                "invalid group_by '{other}'"
+            )))
+        }
     };
     let mut sql = format!(
         "SELECT {col} AS k, COUNT(*) AS requests, COALESCE(SUM(input_tokens),0) AS in_t, COALESCE(SUM(output_tokens),0) AS out_t, COALESCE(SUM(cost_usd),0) AS cost \
@@ -572,7 +599,9 @@ pub fn usage_aggregation(
     let rows = stmt
         .query_map(params_vec.as_slice(), |r| {
             Ok(UsageBucket {
-                key: r.get::<_, Option<String>>(0)?.unwrap_or_else(|| "(all)".to_string()),
+                key: r
+                    .get::<_, Option<String>>(0)?
+                    .unwrap_or_else(|| "(all)".to_string()),
                 requests: r.get::<_, i64>(1)? as u64,
                 input_tokens: r.get::<_, i64>(2)? as u64,
                 output_tokens: r.get::<_, i64>(3)? as u64,
@@ -581,7 +610,9 @@ pub fn usage_aggregation(
         })
         .map_err(sqlite_err)?;
     let mut out = Vec::new();
-    for r in rows { out.push(r.map_err(sqlite_err)?); }
+    for r in rows {
+        out.push(r.map_err(sqlite_err)?);
+    }
     Ok(out)
 }
 
@@ -624,7 +655,9 @@ pub fn load_metric_samples(conn: &rusqlite::Connection) -> RouterResult<Vec<Metr
         })
         .map_err(sqlite_err)?;
     let mut out = Vec::new();
-    for r in rows { out.push(r.map_err(sqlite_err)?); }
+    for r in rows {
+        out.push(r.map_err(sqlite_err)?);
+    }
     Ok(out)
 }
 
@@ -657,12 +690,13 @@ impl Storage {
 impl Storage {
     /// Convenience: take the lock, run a closure with the connection, return its result.
     pub fn with_conn<R, F>(&self, f: F) -> RouterResult<R>
-    where F: FnOnce(&rusqlite::Connection) -> RouterResult<R> {
+    where
+        F: FnOnce(&rusqlite::Connection) -> RouterResult<R>,
+    {
         let conn = self.conn.lock();
         f(&conn)
     }
 }
-
 
 // ---- Audit log ----
 
@@ -686,7 +720,8 @@ impl Storage {
         conn.execute(
             "INSERT INTO audit_events (action, actor, detail, at) VALUES (?1, ?2, ?3, ?4)",
             params![action, actor, detail, now],
-        ).map_err(sqlite_err)?;
+        )
+        .map_err(sqlite_err)?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -697,17 +732,21 @@ impl Storage {
             let mut stmt = c.prepare(
                 "SELECT id, action, actor, detail, at FROM audit_events ORDER BY id DESC LIMIT ?1"
             ).map_err(sqlite_err)?;
-            let rows = stmt.query_map(params![lim], |r| {
-                Ok(AuditEvent {
-                    id: r.get(0)?,
-                    action: r.get(1)?,
-                    actor: r.get(2)?,
-                    detail: r.get(3)?,
-                    at: r.get(4)?,
+            let rows = stmt
+                .query_map(params![lim], |r| {
+                    Ok(AuditEvent {
+                        id: r.get(0)?,
+                        action: r.get(1)?,
+                        actor: r.get(2)?,
+                        detail: r.get(3)?,
+                        at: r.get(4)?,
+                    })
                 })
-            }).map_err(sqlite_err)?;
+                .map_err(sqlite_err)?;
             let mut out = Vec::new();
-            for row in rows { out.push(row.map_err(sqlite_err)?); }
+            for row in rows {
+                out.push(row.map_err(sqlite_err)?);
+            }
             Ok(out)
         })
     }

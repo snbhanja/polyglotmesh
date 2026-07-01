@@ -49,7 +49,11 @@ pub struct Counter {
 
 impl Counter {
     pub const fn new(name: &'static str, help: &'static str) -> Self {
-        Self { name, help, values: RwLock::new(BTreeMap::new()) }
+        Self {
+            name,
+            help,
+            values: RwLock::new(BTreeMap::new()),
+        }
     }
     pub fn inc(&self, labels: Vec<(&'static str, String)>, by: u64) {
         let mut g = self.values.write();
@@ -58,17 +62,24 @@ impl Counter {
     }
     pub fn snapshot(&self) -> Vec<CounterSample> {
         let g = self.values.read();
-        g.iter().map(|(labels, v)| CounterSample {
-            labels: labels.iter().map(|(k, val)| (k.to_string(), val.clone())).collect(),
-            value: v.load(Ordering::Relaxed),
-        }).collect()
+        g.iter()
+            .map(|(labels, v)| CounterSample {
+                labels: labels
+                    .iter()
+                    .map(|(k, val)| (k.to_string(), val.clone()))
+                    .collect(),
+                value: v.load(Ordering::Relaxed),
+            })
+            .collect()
     }
     /// Zero every label series. Used by operational `reset()` to clear the
     /// in-memory counters without touching the SQLite snapshot (which holds
     /// long-term cumulative totals).
     pub fn reset(&self) {
         let g = self.values.read();
-        for v in g.values() { v.store(0, Ordering::Relaxed); }
+        for v in g.values() {
+            v.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -97,12 +108,23 @@ impl Histogram {
     /// Build the histogram with a runtime-known bucket set.
     pub fn with_buckets(name: &'static str, help: &'static str, buckets_us: &[u64]) -> Self {
         let counts = (0..buckets_us.len()).map(|_| AtomicU64::new(0)).collect();
-        Self { name, help, buckets_us: Box::leak(buckets_us.to_vec().into_boxed_slice()), counts, sum_us: AtomicU64::new(0), count: AtomicU64::new(0) }
+        Self {
+            name,
+            help,
+            buckets_us: Box::leak(buckets_us.to_vec().into_boxed_slice()),
+            counts,
+            sum_us: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
     }
 
     pub fn observe_us(&self, us: u64) {
         // Find the first bucket whose upper bound is >= us.
-        let idx = self.buckets_us.iter().position(|&b| us <= b).unwrap_or(self.buckets_us.len() - 1);
+        let idx = self
+            .buckets_us
+            .iter()
+            .position(|&b| us <= b)
+            .unwrap_or(self.buckets_us.len() - 1);
         self.counts[idx].fetch_add(1, Ordering::Relaxed);
         self.sum_us.fetch_add(us, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
@@ -113,7 +135,10 @@ impl Histogram {
         let mut running: u64 = 0;
         for (i, b) in self.buckets_us.iter().enumerate() {
             running = running.saturating_add(self.counts[i].load(Ordering::Relaxed));
-            cumulative.push(HistogramBucket { le_us: *b, count: running });
+            cumulative.push(HistogramBucket {
+                le_us: *b,
+                count: running,
+            });
         }
         let count = self.count.load(Ordering::Relaxed);
         HistogramSample {
@@ -127,28 +152,38 @@ impl Histogram {
     pub fn quantiles_us(&self, qs: &[f64]) -> Vec<(f64, u64)> {
         let snap = self.snapshot();
         let total = snap.count as f64;
-        if total == 0.0 { return qs.iter().map(|q| (*q, 0)).collect(); }
-        qs.iter().map(|q| {
-            let target = (total * q).ceil() as u64;
-            let hit = snap.buckets.iter().find(|b| b.count >= target);
-            (*q, hit.map(|b| b.le_us).unwrap_or(u64::MAX))
-        }).collect()
+        if total == 0.0 {
+            return qs.iter().map(|q| (*q, 0)).collect();
+        }
+        qs.iter()
+            .map(|q| {
+                let target = (total * q).ceil() as u64;
+                let hit = snap.buckets.iter().find(|b| b.count >= target);
+                (*q, hit.map(|b| b.le_us).unwrap_or(u64::MAX))
+            })
+            .collect()
     }
 
     /// Same as `quantiles_us` but takes a precomputed `HistogramSample`.
     /// Used by `LabeledHistogram` snapshot rendering.
     pub fn quantiles_from_sample(snap: &HistogramSample, qs: &[f64]) -> Vec<(f64, u64)> {
         let total = snap.count as f64;
-        if total == 0.0 { return qs.iter().map(|q| (*q, 0)).collect(); }
-        qs.iter().map(|q| {
-            let target = (total * q).ceil() as u64;
-            let hit = snap.buckets.iter().find(|b| b.count >= target);
-            (*q, hit.map(|b| b.le_us).unwrap_or(u64::MAX))
-        }).collect()
+        if total == 0.0 {
+            return qs.iter().map(|q| (*q, 0)).collect();
+        }
+        qs.iter()
+            .map(|q| {
+                let target = (total * q).ceil() as u64;
+                let hit = snap.buckets.iter().find(|b| b.count >= target);
+                (*q, hit.map(|b| b.le_us).unwrap_or(u64::MAX))
+            })
+            .collect()
     }
     /// Zero every bucket, the running sum, and the total count.
     pub fn reset(&self) {
-        for c in &self.counts { c.store(0, Ordering::Relaxed); }
+        for c in &self.counts {
+            c.store(0, Ordering::Relaxed);
+        }
         self.sum_us.store(0, Ordering::Relaxed);
         self.count.store(0, Ordering::Relaxed);
     }
@@ -181,24 +216,38 @@ pub struct LabeledHistogram {
 
 impl LabeledHistogram {
     pub fn new(name: &'static str, help: &'static str, buckets_us: &'static [u64]) -> Self {
-        Self { name, help, buckets_us, series: RwLock::new(BTreeMap::new()) }
+        Self {
+            name,
+            help,
+            buckets_us,
+            series: RwLock::new(BTreeMap::new()),
+        }
     }
     pub fn observe(&self, labels: Vec<(&'static str, String)>, us: u64) {
         let mut g = self.series.write();
-        let h = g.entry(labels).or_insert_with(|| Histogram::with_buckets(self.name, self.help, self.buckets_us));
+        let h = g
+            .entry(labels)
+            .or_insert_with(|| Histogram::with_buckets(self.name, self.help, self.buckets_us));
         h.observe_us(us);
     }
     pub fn snapshot(&self) -> Vec<(Vec<(String, String)>, HistogramSample)> {
         let g = self.series.read();
-        g.iter().map(|(labels, h)| {
-            let labels_owned: Vec<(String, String)> = labels.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-            (labels_owned, h.snapshot())
-        }).collect()
+        g.iter()
+            .map(|(labels, h)| {
+                let labels_owned: Vec<(String, String)> = labels
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
+                (labels_owned, h.snapshot())
+            })
+            .collect()
     }
     /// Zero every per-label histogram (buckets + sum + count).
     pub fn reset(&self) {
         let g = self.series.read();
-        for h in g.values() { h.reset(); }
+        for h in g.values() {
+            h.reset();
+        }
     }
 }
 
@@ -212,31 +261,48 @@ pub struct Gauge {
 
 impl Gauge {
     pub const fn new(name: &'static str, help: &'static str) -> Self {
-        Self { name, help, values: RwLock::new(BTreeMap::new()) }
+        Self {
+            name,
+            help,
+            values: RwLock::new(BTreeMap::new()),
+        }
     }
     pub fn set(&self, labels: Vec<(&'static str, String)>, v: u64) {
         let mut g = self.values.write();
-        g.entry(labels).or_insert_with(|| AtomicU64::new(0)).store(v, Ordering::Relaxed);
+        g.entry(labels)
+            .or_insert_with(|| AtomicU64::new(0))
+            .store(v, Ordering::Relaxed);
     }
     pub fn inc(&self, labels: Vec<(&'static str, String)>) {
         let mut g = self.values.write();
-        g.entry(labels).or_insert_with(|| AtomicU64::new(0)).fetch_add(1, Ordering::Relaxed);
+        g.entry(labels)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
     }
     pub fn dec(&self, labels: Vec<(&'static str, String)>) {
         let mut g = self.values.write();
-        g.entry(labels).or_insert_with(|| AtomicU64::new(0)).fetch_sub(1, Ordering::Relaxed);
+        g.entry(labels)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_sub(1, Ordering::Relaxed);
     }
     pub fn snapshot(&self) -> Vec<CounterSample> {
         let g = self.values.read();
-        g.iter().map(|(labels, v)| CounterSample {
-            labels: labels.iter().map(|(k, val)| (k.to_string(), val.clone())).collect(),
-            value: v.load(Ordering::Relaxed),
-        }).collect()
+        g.iter()
+            .map(|(labels, v)| CounterSample {
+                labels: labels
+                    .iter()
+                    .map(|(k, val)| (k.to_string(), val.clone()))
+                    .collect(),
+                value: v.load(Ordering::Relaxed),
+            })
+            .collect()
     }
     /// Zero every gauge series. Used by operational `reset()`.
     pub fn reset(&self) {
         let g = self.values.read();
-        for v in g.values() { v.store(0, Ordering::Relaxed); }
+        for v in g.values() {
+            v.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -245,8 +311,8 @@ impl Gauge {
 /// Default latency buckets in microseconds: 1ms, 2ms, 5ms, 10ms, 20ms, 50ms,
 /// 100ms, 200ms, 500ms, 1s, 2s, 5s, 10s, 30s.
 pub const DEFAULT_BUCKETS_US: &[u64] = &[
-    1_000, 2_000, 5_000, 10_000, 20_000, 50_000,
-    100_000, 200_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000, 30_000_000,
+    1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000,
+    5_000_000, 10_000_000, 30_000_000,
 ];
 
 pub struct Metrics {
@@ -294,25 +360,70 @@ impl Metrics {
         ];
         Arc::new(Self {
             requests_total: Counter::new("requests_total", "Total incoming proxy requests."),
-            upstream_requests_total: Counter::new("upstream_requests_total", "Requests forwarded to upstreams."),
+            upstream_requests_total: Counter::new(
+                "upstream_requests_total",
+                "Requests forwarded to upstreams.",
+            ),
             success_total: Counter::new("success_total", "Successful upstream responses (2xx)."),
-            error_total: Counter::new("error_total", "Failed upstream responses, labeled by reason."),
+            error_total: Counter::new(
+                "error_total",
+                "Failed upstream responses, labeled by reason.",
+            ),
             input_tokens_total: Counter::new("input_tokens_total", "Total prompt tokens consumed."),
-            output_tokens_total: Counter::new("output_tokens_total", "Total completion tokens generated."),
-            cost_micros_total: Counter::new("cost_micros_total", "Total cost in USD micros (1e-6)."),
-            cache_read_input_tokens_total: Counter::new("cache_read_input_tokens_total", "Provider-side cache-read prompt tokens."),
-            cache_write_input_tokens_total: Counter::new("cache_write_input_tokens_total", "Provider-side cache-write prompt tokens."),
+            output_tokens_total: Counter::new(
+                "output_tokens_total",
+                "Total completion tokens generated.",
+            ),
+            cost_micros_total: Counter::new(
+                "cost_micros_total",
+                "Total cost in USD micros (1e-6).",
+            ),
+            cache_read_input_tokens_total: Counter::new(
+                "cache_read_input_tokens_total",
+                "Provider-side cache-read prompt tokens.",
+            ),
+            cache_write_input_tokens_total: Counter::new(
+                "cache_write_input_tokens_total",
+                "Provider-side cache-write prompt tokens.",
+            ),
 
-            request_duration: Histogram::with_buckets("request_duration_seconds", "Full request latency (proxy receive → response end).", DEFAULT_BUCKETS_US),
-            upstream_duration: Histogram::with_buckets("upstream_duration_seconds", "Upstream call latency (send → first byte).", DEFAULT_BUCKETS_US),
-            ttft: Histogram::with_buckets("time_to_first_token_seconds", "Time from upstream send to first SSE byte (streaming only).", DEFAULT_BUCKETS_US),
-            inter_token: Histogram::with_buckets("stream_inter_token_seconds", "Gap between consecutive SSE chunks during a stream.", inter_token_buckets),
-            request_duration_by_upstream: LabeledHistogram::new("request_duration_by_upstream", "Request latency broken down by upstream_id and model.", DEFAULT_BUCKETS_US),
-            upstream_duration_by_upstream: LabeledHistogram::new("upstream_duration_by_upstream", "Upstream latency broken down by upstream_id and model.", DEFAULT_BUCKETS_US),
+            request_duration: Histogram::with_buckets(
+                "request_duration_seconds",
+                "Full request latency (proxy receive → response end).",
+                DEFAULT_BUCKETS_US,
+            ),
+            upstream_duration: Histogram::with_buckets(
+                "upstream_duration_seconds",
+                "Upstream call latency (send → first byte).",
+                DEFAULT_BUCKETS_US,
+            ),
+            ttft: Histogram::with_buckets(
+                "time_to_first_token_seconds",
+                "Time from upstream send to first SSE byte (streaming only).",
+                DEFAULT_BUCKETS_US,
+            ),
+            inter_token: Histogram::with_buckets(
+                "stream_inter_token_seconds",
+                "Gap between consecutive SSE chunks during a stream.",
+                inter_token_buckets,
+            ),
+            request_duration_by_upstream: LabeledHistogram::new(
+                "request_duration_by_upstream",
+                "Request latency broken down by upstream_id and model.",
+                DEFAULT_BUCKETS_US,
+            ),
+            upstream_duration_by_upstream: LabeledHistogram::new(
+                "upstream_duration_by_upstream",
+                "Upstream latency broken down by upstream_id and model.",
+                DEFAULT_BUCKETS_US,
+            ),
 
             active_requests: Gauge::new("active_requests", "Currently in-flight proxy requests."),
             active_streams: Gauge::new("active_streams", "Currently open streaming responses."),
-            upstream_up: Gauge::new("upstream_up", "1 if the last attempt to this upstream succeeded, 0 otherwise."),
+            upstream_up: Gauge::new(
+                "upstream_up",
+                "1 if the last attempt to this upstream succeeded, 0 otherwise.",
+            ),
             rates: parking_lot::RwLock::new(Rates::new()),
             traces: TraceRing::new(1000),
             events: EventBus::new(),
@@ -320,7 +431,9 @@ impl Metrics {
     }
 
     /// Record one trace span.
-    pub fn record_trace(&self, span: TraceSpan) { self.traces.push(span); }
+    pub fn record_trace(&self, span: TraceSpan) {
+        self.traces.push(span);
+    }
 
     /// Record one finished request with its token counts + cost.
     /// Updates the sliding-window rate rings.
@@ -430,64 +543,135 @@ impl Metrics {
     /// Prometheus text-format export (compatible with the `text/plain; version=0.0.4` content type).
     pub fn prometheus_text(&self) -> String {
         let mut out = String::with_capacity(4096);
-        let write_metric = |out: &mut String, name: &str, help: &str, kind: &str, samples: &[(Vec<(String, String)>, u64)]| {
+        let write_metric = |out: &mut String,
+                            name: &str,
+                            help: &str,
+                            kind: &str,
+                            samples: &[(Vec<(String, String)>, u64)]| {
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
             for (labels, value) in samples {
                 if labels.is_empty() {
                     out.push_str(&format!("{name} {value}\n"));
                 } else {
-                    let lbl = labels.iter()
-                        .map(|(k, v)| format!("{k}=\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
-                        .collect::<Vec<_>>().join(",");
+                    let lbl = labels
+                        .iter()
+                        .map(|(k, v)| {
+                            format!("{k}=\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
                     out.push_str(&format!("{name}{{{lbl}}} {value}\n"));
                 }
             }
         };
         // Counters
-        for c in [&self.requests_total, &self.upstream_requests_total, &self.success_total,
-                  &self.error_total, &self.input_tokens_total, &self.output_tokens_total,
-                  &self.cost_micros_total, &self.cache_read_input_tokens_total,
-                  &self.cache_write_input_tokens_total] {
-            let samples: Vec<_> = c.snapshot().into_iter()
-                .map(|s| (s.labels, s.value)).collect();
+        for c in [
+            &self.requests_total,
+            &self.upstream_requests_total,
+            &self.success_total,
+            &self.error_total,
+            &self.input_tokens_total,
+            &self.output_tokens_total,
+            &self.cost_micros_total,
+            &self.cache_read_input_tokens_total,
+            &self.cache_write_input_tokens_total,
+        ] {
+            let samples: Vec<_> = c
+                .snapshot()
+                .into_iter()
+                .map(|s| (s.labels, s.value))
+                .collect();
             write_metric(&mut out, c.name, c.help, "counter", &samples);
         }
         // Gauges
-        for g in [&self.active_requests, &self.active_streams, &self.upstream_up] {
-            let samples: Vec<_> = g.snapshot().into_iter()
-                .map(|s| (s.labels, s.value)).collect();
+        for g in [
+            &self.active_requests,
+            &self.active_streams,
+            &self.upstream_up,
+        ] {
+            let samples: Vec<_> = g
+                .snapshot()
+                .into_iter()
+                .map(|s| (s.labels, s.value))
+                .collect();
             write_metric(&mut out, g.name, g.help, "gauge", &samples);
         }
         // Histograms (Prometheus convention: emit `_bucket{le=...}`, `_sum`, `_count`)
-        for h in [&self.request_duration, &self.upstream_duration, &self.ttft, &self.inter_token] {
+        for h in [
+            &self.request_duration,
+            &self.upstream_duration,
+            &self.ttft,
+            &self.inter_token,
+        ] {
             let snap = h.snapshot();
-            out.push_str(&format!("# HELP {} {}\n# TYPE {} histogram\n", h.name, h.help, h.name));
+            out.push_str(&format!(
+                "# HELP {} {}\n# TYPE {} histogram\n",
+                h.name, h.help, h.name
+            ));
             for b in &snap.buckets {
-                out.push_str(&format!("{}_bucket{{le=\"{}\"}} {}\n", h.name, fmt_le(b.le_us), b.count));
+                out.push_str(&format!(
+                    "{}_bucket{{le=\"{}\"}} {}\n",
+                    h.name,
+                    fmt_le(b.le_us),
+                    b.count
+                ));
             }
-            out.push_str(&format!("{}_bucket{{le=\"+Inf\"}} {}\n", h.name, snap.count));
-            out.push_str(&format!("{}_sum {}\n", h.name, snap.sum_us as f64 / 1_000_000.0));
+            out.push_str(&format!(
+                "{}_bucket{{le=\"+Inf\"}} {}\n",
+                h.name, snap.count
+            ));
+            out.push_str(&format!(
+                "{}_sum {}\n",
+                h.name,
+                snap.sum_us as f64 / 1_000_000.0
+            ));
             out.push_str(&format!("{}_count {}\n", h.name, snap.count));
         }
         // Labeled histograms: one HELP/TYPE per series, suffixed with the label values.
-        for lh in [&self.request_duration_by_upstream, &self.upstream_duration_by_upstream] {
+        for lh in [
+            &self.request_duration_by_upstream,
+            &self.upstream_duration_by_upstream,
+        ] {
             for (labels, snap) in lh.snapshot() {
-                if labels.is_empty() { continue; }
-                let lbl_str = labels.iter()
-                    .map(|(k, v)| format!("{}=\"{}\"", k, v.replace('\\', "\\\\").replace('"', "\\\"")))
-                    .collect::<Vec<_>>().join(",");
-                let series_name = format!("{lh_name}{{{lbl_str}}}", lh_name = lh.name);
-                out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n",
-                    name = series_name, help = lh.help));
-                for b in &snap.buckets {
-                    out.push_str(&format!("{name}_bucket{{le=\"{le}\"}} {count}\n",
-                        name = series_name, le = fmt_le(b.le_us), count = b.count));
+                if labels.is_empty() {
+                    continue;
                 }
-                out.push_str(&format!("{name}_bucket{{le=\"+Inf\"}} {count}\n",
-                    name = series_name, count = snap.count));
-                out.push_str(&format!("{name}_sum {sum}\n",
-                    name = series_name, sum = snap.sum_us as f64 / 1_000_000.0));
-                out.push_str(&format!("{name}_count {count}\n", name = series_name, count = snap.count));
+                let lbl_str = labels
+                    .iter()
+                    .map(|(k, v)| {
+                        format!("{}=\"{}\"", k, v.replace('\\', "\\\\").replace('"', "\\\""))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let series_name = format!("{lh_name}{{{lbl_str}}}", lh_name = lh.name);
+                out.push_str(&format!(
+                    "# HELP {name} {help}\n# TYPE {name} histogram\n",
+                    name = series_name,
+                    help = lh.help
+                ));
+                for b in &snap.buckets {
+                    out.push_str(&format!(
+                        "{name}_bucket{{le=\"{le}\"}} {count}\n",
+                        name = series_name,
+                        le = fmt_le(b.le_us),
+                        count = b.count
+                    ));
+                }
+                out.push_str(&format!(
+                    "{name}_bucket{{le=\"+Inf\"}} {count}\n",
+                    name = series_name,
+                    count = snap.count
+                ));
+                out.push_str(&format!(
+                    "{name}_sum {sum}\n",
+                    name = series_name,
+                    sum = snap.sum_us as f64 / 1_000_000.0
+                ));
+                out.push_str(&format!(
+                    "{name}_count {count}\n",
+                    name = series_name,
+                    count = snap.count
+                ));
             }
         }
         out
@@ -495,9 +679,13 @@ impl Metrics {
 }
 
 fn fmt_le(us: u64) -> String {
-    if us >= 1_000_000 { format!("{:.2}s", us as f64 / 1_000_000.0) }
-    else if us >= 1_000 { format!("{:.0}ms", us as f64 / 1_000.0) }
-    else { format!("{us}us") }
+    if us >= 1_000_000 {
+        format!("{:.2}s", us as f64 / 1_000_000.0)
+    } else if us >= 1_000 {
+        format!("{:.0}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{us}us")
+    }
 }
 
 impl Metrics {
@@ -515,15 +703,29 @@ impl Metrics {
             ("input_tokens_total", &self.input_tokens_total),
             ("output_tokens_total", &self.output_tokens_total),
             ("cost_micros_total", &self.cost_micros_total),
-            ("cache_read_input_tokens_total", &self.cache_read_input_tokens_total),
-            ("cache_write_input_tokens_total", &self.cache_write_input_tokens_total),
+            (
+                "cache_read_input_tokens_total",
+                &self.cache_read_input_tokens_total,
+            ),
+            (
+                "cache_write_input_tokens_total",
+                &self.cache_write_input_tokens_total,
+            ),
         ];
         for (name, c) in counter_pairs {
             for s in c.snapshot() {
                 let labels_json = serde_json::to_string(
-                    &s.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>()
-                ).unwrap_or_else(|_| "[]".to_string());
-                out.push(MetricSampleRow { name: name.to_string(), labels_json, value: s.value as i64 });
+                    &s.labels
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+                out.push(MetricSampleRow {
+                    name: name.to_string(),
+                    labels_json,
+                    value: s.value as i64,
+                });
             }
         }
         // Histograms
@@ -545,7 +747,8 @@ impl Metrics {
                 let labels_json = serde_json::to_string(&vec![
                     ("le_us", le.to_string()),
                     ("path", path.to_string()),
-                ]).unwrap_or_else(|_| "[]".to_string());
+                ])
+                .unwrap_or_else(|_| "[]".to_string());
                 out.push(MetricSampleRow {
                     name: format!("{path}_bucket"),
                     labels_json,
@@ -553,7 +756,8 @@ impl Metrics {
                 });
             }
             // sum + count: use a single label "path" and store the actual value in `value`.
-            let labels_json = serde_json::to_string(&vec![("path", path.to_string())]).unwrap_or_default();
+            let labels_json =
+                serde_json::to_string(&vec![("path", path.to_string())]).unwrap_or_default();
             out.push(MetricSampleRow {
                 name: format!("_hist_sum::{path}"),
                 labels_json: labels_json.clone(),
@@ -583,15 +787,29 @@ impl Metrics {
             ("input_tokens_total", &self.input_tokens_total),
             ("output_tokens_total", &self.output_tokens_total),
             ("cost_micros_total", &self.cost_micros_total),
-            ("cache_read_input_tokens_total", &self.cache_read_input_tokens_total),
-            ("cache_write_input_tokens_total", &self.cache_write_input_tokens_total),
+            (
+                "cache_read_input_tokens_total",
+                &self.cache_read_input_tokens_total,
+            ),
+            (
+                "cache_write_input_tokens_total",
+                &self.cache_write_input_tokens_total,
+            ),
         ];
         for (name, c) in counter_pairs {
             for s in c.snapshot() {
                 let labels_json = serde_json::to_string(
-                    &s.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>()
-                ).unwrap_or_else(|_| "[]".to_string());
-                out.push(MetricSampleRow { name: name.to_string(), labels_json, value: s.value as i64 });
+                    &s.labels
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+                out.push(MetricSampleRow {
+                    name: name.to_string(),
+                    labels_json,
+                    value: s.value as i64,
+                });
             }
         }
         // Histogram sum + count only.
@@ -602,9 +820,18 @@ impl Metrics {
             ("stream_inter_token_seconds", &self.inter_token),
         ];
         for (path, h) in hist_pairs {
-            let labels_json = serde_json::to_string(&vec![("path", path.to_string())]).unwrap_or_default();
-            out.push(MetricSampleRow { name: format!("_hist_sum::{path}"), labels_json: labels_json.clone(), value: h.sum_us.load(Ordering::Relaxed) as i64 });
-            out.push(MetricSampleRow { name: format!("_hist_count::{path}"), labels_json, value: h.count.load(Ordering::Relaxed) as i64 });
+            let labels_json =
+                serde_json::to_string(&vec![("path", path.to_string())]).unwrap_or_default();
+            out.push(MetricSampleRow {
+                name: format!("_hist_sum::{path}"),
+                labels_json: labels_json.clone(),
+                value: h.sum_us.load(Ordering::Relaxed) as i64,
+            });
+            out.push(MetricSampleRow {
+                name: format!("_hist_count::{path}"),
+                labels_json,
+                value: h.count.load(Ordering::Relaxed) as i64,
+            });
         }
         out
     }
@@ -660,7 +887,9 @@ impl RateRing {
         let head = self.head.load(std::sync::atomic::Ordering::Relaxed);
         // We assume `add` has been called recently enough to keep the ring current.
         // If `now_s` is far ahead of `head`, treat missing buckets as 0.
-        if now_s > head + self.window_s as u64 + 5 { return 0; }
+        if now_s > head + self.window_s as u64 + 5 {
+            return 0;
+        }
         let mut total = 0u64;
         for i in 0..self.window_s as u64 {
             let ts = now_s.saturating_sub(i);
@@ -677,7 +906,9 @@ impl RateRing {
     /// The next `add()` will rebuild the ring from the current second.
     pub fn reset(&self) {
         let mut g = self.buckets.lock();
-        for v in g.iter_mut() { *v = 0; }
+        for v in g.iter_mut() {
+            *v = 0;
+        }
         self.head.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -749,11 +980,16 @@ pub struct TraceRing {
 
 impl TraceRing {
     pub fn new(capacity: usize) -> Self {
-        Self { inner: parking_lot::Mutex::new(Vec::with_capacity(capacity)), capacity }
+        Self {
+            inner: parking_lot::Mutex::new(Vec::with_capacity(capacity)),
+            capacity,
+        }
     }
     pub fn push(&self, span: TraceSpan) {
         let mut g = self.inner.lock();
-        if g.len() >= self.capacity { g.remove(0); }
+        if g.len() >= self.capacity {
+            g.remove(0);
+        }
         g.push(span);
     }
     pub fn snapshot(&self, limit: usize) -> Vec<TraceSpan> {
@@ -775,7 +1011,9 @@ pub struct EventBus {
 
 impl EventBus {
     pub fn new() -> Self {
-        Self { subs: parking_lot::Mutex::new(Vec::new()) }
+        Self {
+            subs: parking_lot::Mutex::new(Vec::new()),
+        }
     }
     pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<serde_json::Value> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -786,5 +1024,7 @@ impl EventBus {
         let mut g = self.subs.lock();
         g.retain(|tx| tx.send(ev.clone()).is_ok());
     }
-    pub fn sub_count(&self) -> usize { self.subs.lock().len() }
+    pub fn sub_count(&self) -> usize {
+        self.subs.lock().len()
+    }
 }
