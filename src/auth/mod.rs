@@ -276,14 +276,14 @@ pub fn hash(s: &str) -> String {
 
 pub fn generate_api_key() -> String {
     let mut buf = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
     format!("{API_KEY_PREFIX}-{token}")
 }
 
 pub fn generate_admin_key() -> String {
     let mut buf = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
     format!("{ADMIN_KEY_PREFIX}-{token}")
 }

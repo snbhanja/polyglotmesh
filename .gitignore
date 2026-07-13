@@ -29,3 +29,4 @@ state.db-wal
 
 # OS
 Thumbs.db
+.commandcode/
