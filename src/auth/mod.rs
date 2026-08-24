@@ -72,6 +72,7 @@ pub struct KeyRecord {
     pub expires_at: Option<chrono::DateTime<Utc>>,
     pub allowed_model_region: Option<String>,
     pub blocked: bool,
+    pub allowed_cidrs: Vec<ipnet::IpNet>,
     pub created_at: chrono::DateTime<Utc>,
     pub usage: KeyUsage,
 }
@@ -102,6 +103,11 @@ impl KeyRecord {
             expires_at,
             allowed_model_region: cfg.allowed_model_region,
             blocked: cfg.blocked,
+            allowed_cidrs: cfg
+                .allowed_cidrs
+                .iter()
+                .filter_map(|c| c.parse::<ipnet::IpNet>().ok())
+                .collect(),
             created_at: Utc::now(),
             usage: KeyUsage::new(),
         })
@@ -122,6 +128,11 @@ impl KeyRecord {
             "expires_at": self.expires_at,
             "allowed_model_region": self.allowed_model_region,
             "blocked": self.blocked,
+            "allowed_cidrs": self
+                .allowed_cidrs
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>(),
             "created_at": self.created_at,
             "usage": self.usage.snapshot(),
         })
@@ -162,6 +173,7 @@ impl AuthStore {
             soft_budget: None,
             allowed_model_region: None,
             blocked: false,
+            allowed_cidrs: vec![],
         };
         self.add(cfg);
     }
@@ -182,6 +194,7 @@ impl AuthStore {
             soft_budget: None,
             allowed_model_region: None,
             blocked: false,
+            allowed_cidrs: vec![],
         };
         self.add(cfg);
     }
@@ -309,6 +322,7 @@ pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 pub fn authorize(
     headers: &axum::http::HeaderMap,
     store: &Arc<AuthStore>,
+    client_ip: Option<std::net::IpAddr>,
 ) -> RouterResult<Arc<KeyRecord>> {
     let token = bearer_token(headers)
         .ok_or_else(|| RouterError::Unauthorized("missing Authorization header".into()))?;
@@ -321,6 +335,24 @@ pub fn authorize(
     if let Some(exp) = rec.expires_at {
         if Utc::now() > exp {
             return Err(RouterError::Unauthorized("key has expired".into()));
+        }
+    }
+    // IP allowlist enforcement (if configured).
+    if !rec.allowed_cidrs.is_empty() {
+        match client_ip {
+            Some(ip) => {
+                let allowed = rec.allowed_cidrs.iter().any(|net| net.contains(&ip));
+                if !allowed {
+                    return Err(RouterError::Unauthorized(
+                        "client address not in key's allowed_cidrs".into(),
+                    ));
+                }
+            }
+            None => {
+                return Err(RouterError::Unauthorized(
+                    "client address unavailable; key requires allowed_cidrs".into(),
+                ));
+            }
         }
     }
     // RPM check
@@ -451,3 +483,297 @@ impl RouterError {
 
 #[allow(unused_imports)]
 use std::sync::atomic::AtomicU32 as _AtomicU32;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{ApiKeyConfig, ProviderKind};
+    use crate::error::RouterError;
+
+    fn make_key_cfg(raw: &str) -> ApiKeyConfig {
+        ApiKeyConfig {
+            key: Some(raw.to_string()),
+            key_alias: None,
+            role: "api".into(),
+            models: vec![],
+            allowed_providers: vec![],
+            rpm_limit: 0,
+            tpm_limit: 0,
+            max_parallel_requests: 0,
+            max_budget: None,
+            budget_duration: None,
+            expires: None,
+            soft_budget: None,
+            allowed_model_region: None,
+            blocked: false,
+            allowed_cidrs: vec![],
+        }
+    }
+
+    #[test]
+    fn generated_keys_have_expected_prefixes() {
+        let api = generate_api_key();
+        let admin = generate_admin_key();
+        assert!(api.starts_with("pgm-"), "api key was {api}");
+        assert!(admin.starts_with("pgm-admin-"), "admin key was {admin}");
+        // 32 bytes hex + prefix == 3 + 64
+        assert_eq!(api.len(), "pgm-".len() + 64);
+        // 24 bytes hex for admin
+        assert_eq!(admin.len(), "pgm-admin-".len() + 48);
+    }
+
+    #[test]
+    fn generated_keys_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            assert!(seen.insert(generate_api_key()));
+        }
+    }
+
+    #[test]
+    fn hash_is_deterministic_and_hex() {
+        let a = hash("hello");
+        let b = hash("hello");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(hex::decode(&a).is_ok());
+        assert_ne!(hash("hello"), hash("world"));
+    }
+
+    #[test]
+    fn store_validates_api_and_admin_keys() {
+        let store = AuthStore::new();
+        store.add_api_key("key-1");
+        store.add_admin_key("admin-1");
+
+        assert!(store.validate_api_key("key-1"));
+        assert!(!store.validate_api_key("admin-1"));
+        assert!(store.validate_admin_key("admin-1"));
+        assert!(!store.validate_admin_key("key-1"));
+        assert!(!store.validate_api_key("nope"));
+        assert!(!store.validate_api_key(""));
+    }
+
+    #[test]
+    fn check_bearer_strips_prefix_and_rejects_empty() {
+        let store = AuthStore::new();
+        store.add_api_key("secret");
+        assert!(store.check_bearer(Some("Bearer secret")));
+        assert!(store.check_bearer(Some("  secret  ")));
+        assert!(!store.check_bearer(Some("Bearer wrong")));
+        assert!(!store.check_bearer(None));
+        assert!(!store.check_bearer(Some("  ")));
+    }
+
+    #[test]
+    fn check_admin_accepts_either_role() {
+        let store = AuthStore::new();
+        store.add_api_key("a-key");
+        store.add_admin_key("a-admin");
+        assert!(store.check_admin(Some("Bearer a-admin")));
+        assert!(store.check_admin(Some("Bearer a-key")));
+        assert!(!store.check_admin(Some("Bearer nope")));
+    }
+
+    #[test]
+    fn remove_by_raw_works() {
+        let store = AuthStore::new();
+        store.add_api_key("k");
+        assert!(store.remove_by_raw("k"));
+        assert!(!store.remove_by_raw("k"));
+        assert_eq!(store.api_key_count(), 0);
+    }
+
+    #[test]
+    fn bearer_token_extracts_from_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer abc123"),
+        );
+        assert_eq!(bearer_token(&headers).as_deref(), Some("abc123"));
+
+        let none = axum::http::HeaderMap::new();
+        assert_eq!(bearer_token(&none), None);
+    }
+
+    #[test]
+    fn key_record_from_config_requires_key() {
+        let cfg = make_key_cfg("");
+        assert!(matches!(
+            KeyRecord::from_config(cfg),
+            Err(RouterError::BadRequest(_))
+        ));
+        let cfg = make_key_cfg("ok");
+        assert!(KeyRecord::from_config(cfg).is_ok());
+    }
+
+    #[test]
+    fn authorize_rejects_missing_and_unknown() {
+        let store = AuthStore::new();
+        store.add_api_key("good");
+        let arc = std::sync::Arc::new(store);
+
+        let missing = axum::http::HeaderMap::new();
+        assert!(matches!(
+            authorize(&missing, &arc, None),
+            Err(RouterError::Unauthorized(_))
+        ));
+
+        let mut bad = axum::http::HeaderMap::new();
+        bad.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer nope"),
+        );
+        assert!(matches!(
+            authorize(&bad, &arc, None),
+            Err(RouterError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn authorize_blocks_blocked_keys() {
+        let store = AuthStore::new();
+        let mut cfg = make_key_cfg("blocked");
+        cfg.blocked = true;
+        store.add(cfg);
+        let arc = std::sync::Arc::new(store);
+
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer blocked"),
+        );
+        assert!(matches!(
+            authorize(&h, &arc, None),
+            Err(RouterError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn authorize_enforces_rpm_limit() {
+        let store = AuthStore::new();
+        let mut cfg = make_key_cfg("rpm");
+        cfg.rpm_limit = 2;
+        store.add(cfg);
+        let arc = std::sync::Arc::new(store);
+
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer rpm"),
+        );
+        // First two succeed, third hits the limit.
+        assert!(authorize(&h, &arc, None).is_ok());
+        assert!(authorize(&h, &arc, None).is_ok());
+        assert!(matches!(
+            authorize(&h, &arc, None),
+            Err(RouterError::TooManyRequests(_))
+        ));
+    }
+
+    #[test]
+    fn authorize_enforces_parallel_limit() {
+        let store = AuthStore::new();
+        let mut cfg = make_key_cfg("par");
+        cfg.max_parallel_requests = 1;
+        store.add(cfg);
+        let arc = std::sync::Arc::new(store);
+
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer par"),
+        );
+        let rec = authorize(&h, &arc, None).unwrap();
+        // Second attempt should fail while the first slot is held.
+        assert!(matches!(
+            authorize(&h, &arc, None),
+            Err(RouterError::TooManyRequests(_))
+        ));
+        release(&rec);
+        assert!(authorize(&h, &arc, None).is_ok());
+    }
+
+    #[test]
+    fn authorize_enforces_budget() {
+        let store = AuthStore::new();
+        let mut cfg = make_key_cfg("budget");
+        cfg.max_budget = Some(1.0);
+        cfg.budget_duration = Some("1h".into());
+        store.add(cfg);
+        let arc = std::sync::Arc::new(store);
+
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer budget"),
+        );
+        let rec = authorize(&h, &arc, None).unwrap();
+        record_usage(&rec, 0, 0, 0.9);
+        release(&rec);
+        // Still under budget.
+        assert!(authorize(&h, &arc, None).is_ok());
+        let rec = authorize(&h, &arc, None).unwrap();
+        record_usage(&rec, 0, 0, 0.5);
+        release(&rec);
+        // Now over budget.
+        assert!(matches!(
+            authorize(&h, &arc, None),
+            Err(RouterError::PaymentRequired(_))
+        ));
+    }
+
+    #[test]
+    fn parse_duration_handles_units() {
+        assert_eq!(parse_duration_to_chrono(Some("30s")), Some(Duration::seconds(30)));
+        assert_eq!(parse_duration_to_chrono(Some("5m")), Some(Duration::minutes(5)));
+        assert_eq!(parse_duration_to_chrono(Some("2h")), Some(Duration::hours(2)));
+        assert_eq!(parse_duration_to_chrono(Some("3d")), Some(Duration::days(3)));
+        assert_eq!(parse_duration_to_chrono(Some("1w")), Some(Duration::weeks(1)));
+        assert_eq!(parse_duration_to_chrono(Some("2M")), Some(Duration::days(60)));
+        assert_eq!(parse_duration_to_chrono(Some("2o")), Some(Duration::days(60)));
+        assert_eq!(parse_duration_to_chrono(None), None);
+        assert_eq!(parse_duration_to_chrono(Some("")), None);
+        assert_eq!(parse_duration_to_chrono(Some("10x")), None);
+    }
+
+    #[test]
+    fn parse_expiry_relative_and_absolute() {
+        let future = parse_expiry("1h").unwrap();
+        assert!(future > Utc::now());
+        let abs = "2099-01-01T00:00:00Z";
+        let future2 = parse_expiry(abs).unwrap();
+        assert_eq!(future2, DateTime::parse_from_rfc3339(abs).unwrap().with_timezone(&Utc));
+        assert_eq!(parse_expiry("garbage"), None);
+    }
+
+    #[test]
+    fn record_usage_updates_counters_and_release() {
+        let rec = KeyRecord::from_config(make_key_cfg("u")).unwrap();
+        record_usage(&rec, 10, 20, 0.5);
+        let snap = rec.usage.snapshot();
+        assert_eq!(snap["total_requests"], 1);
+        assert_eq!(snap["total_input_tokens"], 10);
+        assert_eq!(snap["total_output_tokens"], 20);
+        assert_eq!(snap["total_spend_usd"], 0.5);
+
+        // release only touches in_flight when max_parallel_requests > 0
+        let par = {
+            let mut c = make_key_cfg("u2");
+            c.max_parallel_requests = 2;
+            KeyRecord::from_config(c).unwrap()
+        };
+        par.usage.in_flight.store(1, Ordering::Relaxed);
+        release(&par);
+        assert_eq!(par.usage.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn provider_kind_serde_round_trips() {
+        let json = serde_json::to_string(&ProviderKind::Anthropic).unwrap();
+        assert!(json.contains("anthropic"));
+        let back: ProviderKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ProviderKind::Anthropic);
+    }
+}

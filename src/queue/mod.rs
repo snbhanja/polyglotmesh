@@ -147,3 +147,102 @@ impl QueueManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{ProviderKind, QueueConfig, UpstreamConfig};
+    use crate::upstream::Upstream;
+    use std::collections::BTreeMap;
+
+    fn upstream_cfg(id: &str, max_concurrency: u32, priority: i32) -> UpstreamConfig {
+        UpstreamConfig {
+            id: id.into(),
+            name: None,
+            kind: ProviderKind::Openai,
+            base_url: "https://example.com".into(),
+            api_key: "k".into(),
+            priority,
+            models: vec![],
+            weight: 1,
+            timeout_ms: 60_000,
+            max_concurrency,
+            rate_limit_rpm: 0,
+            rate_limit_tpm: 0,
+            enabled: true,
+            max_budget: None,
+            budget_duration: None,
+            model_info: BTreeMap::new(),
+            region: None,
+            tags: vec![],
+            critical: false,
+            circuit_breaker: None,
+        }
+    }
+
+    fn queue_cfg(max_per_provider: usize, timeout_ms: u64) -> QueueConfig {
+        QueueConfig {
+            max_queue_per_provider: max_per_provider,
+            queue_wait_timeout_ms: timeout_ms,
+            healthcheck_interval_ms: 0,
+            healthcheck_timeout_ms: 0,
+            healthcheck_failure_threshold: 3,
+        }
+    }
+
+    #[test]
+    fn try_acquire_returns_first_admitted() {
+        let qm = QueueManager::new(queue_cfg(0, 1000));
+        // saturated upstream first, free one second
+        let saturated = Upstream::from_config(upstream_cfg("sat", 1, 0));
+        saturated.try_acquire(); // holds the only slot
+        let free = Upstream::from_config(upstream_cfg("free", 1, 0));
+        let chosen = qm.try_acquire(&[saturated.clone(), free.clone()]);
+        assert!(chosen.is_some());
+        assert_eq!(chosen.unwrap().id(), "free");
+    }
+
+    #[tokio::test]
+    async fn acquire_returns_none_when_no_upstreams() {
+        let qm = QueueManager::new(queue_cfg(0, 1000));
+        let res = qm.acquire(vec![], ProviderKind::Openai).await;
+        assert!(matches!(res, Err(RouterError::NoHealthyUpstream(_))));
+        assert_eq!(qm.stats.total_no_upstream.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn acquire_returns_available_upstream_immediately() {
+        let qm = QueueManager::new(queue_cfg(0, 1000));
+        let up = Upstream::from_config(upstream_cfg("u", 2, 0));
+        let res = qm.acquire(vec![up.clone()], ProviderKind::Openai).await;
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap().id(), "u");
+        assert_eq!(qm.stats.total_dispatched.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn acquire_rejects_when_queue_full() {
+        let qm = QueueManager::new(queue_cfg(0, 1000));
+        // max_queue_per_provider = 0 means no waiting slots allowed.
+        let saturated = Upstream::from_config(upstream_cfg("sat", 1, 0));
+        saturated.try_acquire(); // occupy the only slot; queue is full (cap 0)
+        let res = qm.acquire(vec![saturated.clone()], ProviderKind::Openai).await;
+        assert!(res.is_err());
+        assert_eq!(qm.stats.total_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(qm.pending_for(ProviderKind::Openai), 0);
+    }
+
+    #[tokio::test]
+    async fn acquire_rejects_second_when_queue_cap_is_one() {
+        let qm = QueueManager::new(queue_cfg(1, 50));
+        let up = Upstream::from_config(upstream_cfg("u", 1, 0));
+        up.try_acquire(); // occupy the single slot; one queue slot left
+        let r1 = qm.acquire(vec![up.clone()], ProviderKind::Openai);
+        let r2 = qm.acquire(vec![up.clone()], ProviderKind::Openai);
+        let (a, b) = tokio::join!(r1, r2);
+        // First reserves the only queue slot and waits; second is rejected (queue full).
+        // The first then times out because the slot is never released.
+        assert!(a.is_err() && b.is_err());
+        assert_eq!(qm.stats.total_rejected.load(Ordering::Relaxed), 2);
+    }
+}

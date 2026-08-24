@@ -1,13 +1,13 @@
 use crate::auth::{generate_admin_key, generate_api_key};
 use crate::config::types::{ApiKeyConfig, ModelAliasEntry, ProviderKind, UpstreamConfig};
 use crate::error::RouterError;
-
 use crate::state::AppState;
 use crate::storage::UsageBucket;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,18 +30,24 @@ pub fn admin_router(state: SharedState) -> Router<SharedState> {
         )
         .route("/v1/admin/upstreams/:id/pause", post(pause_upstream))
         .route("/v1/admin/upstreams/:id/resume", post(resume_upstream))
+        .route("/v1/admin/upstreams/:id/test", post(test_upstream))
         .route(
             "/v1/admin/upstreams/:id/prices",
             get(get_upstream_prices).post(set_upstream_prices),
         )
         .route("/v1/admin/keys", get(list_keys).post(create_key))
         .route("/v1/admin/keys/:alias", delete(revoke_key_by_alias))
+        .route("/v1/admin/keys/:alias/rotate", post(rotate_key))
         .route("/v1/admin/reload", post(reload_config))
+        .route("/v1/admin/reload/rollback", post(rollback_config))
         .route("/v1/admin/usage", get(admin_usage))
         .route("/v1/admin/usage/recent", get(admin_usage_recent))
+        .route("/v1/admin/usage/spend_history", get(admin_spend_history))
         .route("/v1/admin/usage/retention", post(set_retention))
+        .route("/v1/admin/usage/retention/prune", post(prune_usage_now))
         .route("/v1/admin/metrics", get(admin_metrics_json))
         .route("/v1/admin/metrics/prom", get(admin_metrics_prom))
+        .route("/v1/admin/metrics/rollups", get(admin_rollups))
         .route("/v1/admin/rates", get(admin_rates))
         .route("/v1/admin/traces/recent", get(admin_traces_recent))
         .route("/v1/admin/events/stream", get(admin_events_stream))
@@ -64,7 +70,7 @@ pub async fn admin_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    match crate::auth::authorize(req.headers(), &state.auth) {
+    match crate::auth::authorize(req.headers(), &state.auth, None) {
         Ok(rec) if rec.role == "admin" => next.run(req).await,
         _ => crate::error::RouterError::Unauthorized("admin token required".into()).into_response(),
     }
@@ -150,6 +156,10 @@ pub struct UpstreamInput {
     pub tags: Vec<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub critical: bool,
+    #[serde(default)]
+    pub circuit_breaker: Option<crate::config::types::CircuitBreakerConfig>,
 }
 
 fn default_timeout() -> u64 {
@@ -180,6 +190,8 @@ impl From<UpstreamInput> for UpstreamConfig {
             region: v.region,
             tags: v.tags,
             enabled: v.enabled,
+            critical: v.critical,
+            circuit_breaker: v.circuit_breaker,
         }
     }
 }
@@ -306,6 +318,69 @@ async fn resume_upstream(State(state): State<SharedState>, Path(id): Path<String
     (axum::http::StatusCode::OK, Json(u.snapshot())).into_response()
 }
 
+async fn test_upstream(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(u) = state.registry.get(&id) else {
+        return RouterError::UpstreamNotFound.into_response();
+    };
+    let cfg = u.cfg.read().clone();
+    let url = format!("{}/v1/models", cfg.base_url.trim_end_matches('/'));
+    let timeout = std::time::Duration::from_millis(cfg.timeout_ms.min(10_000));
+    let actor = actor_from_headers(&headers);
+    let started = std::time::Instant::now();
+    let result = state
+        .http
+        .request(reqwest::Method::GET, &url)
+        .header("Authorization", format!("Bearer {}", cfg.api_key))
+        .timeout(timeout)
+        .send()
+        .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let ok = resp.status().is_success();
+            let _ = state
+                .storage
+                .append_audit("upstream.test", &actor, &format!(r#"{{"id":"{}","status":{}}}"#, id, status));
+            if ok {
+                u.record_success();
+            } else {
+                u.record_failure();
+            }
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": id,
+                    "ok": ok,
+                    "status": status,
+                    "elapsed_ms": elapsed_ms,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            u.record_failure();
+            let _ = state
+                .storage
+                .append_audit("upstream.test", &actor, &format!(r#"{{"id":"{}","error":"{}"}}"#, id, e));
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": id,
+                    "ok": false,
+                    "error": e.to_string(),
+                    "elapsed_ms": elapsed_ms,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 // ---- Keys ----
 
 #[derive(Debug, Deserialize, Default)]
@@ -397,6 +472,80 @@ async fn list_keys(State(state): State<SharedState>) -> Response {
         "keys": keys,
     });
     (axum::http::StatusCode::OK, Json(body)).into_response()
+}
+
+async fn rotate_key(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Path(alias): Path<String>,
+) -> Response {
+    // Find the existing record by alias to preserve role and limits.
+    let existing = state
+        .auth
+        .all_keys()
+        .into_iter()
+        .find(|k| k.alias == alias);
+    let Some(rec) = existing else {
+        return (axum::http::StatusCode::NOT_FOUND, "key not found").into_response();
+    };
+    let role = rec.role.clone();
+    let old_raw = rec.raw.clone();
+    let new_raw = match role.as_str() {
+        "admin" => generate_admin_key(),
+        _ => generate_api_key(),
+    };
+    // Build a fresh config for the same alias + role, new raw token.
+    let mut new_cfg = ApiKeyConfig {
+        key: Some(new_raw.clone()),
+        key_alias: Some(alias.clone()),
+        role: role.clone(),
+        ..Default::default()
+    };
+    // Carry over the rich fields from the existing record where possible.
+    if let Some(orig) = state
+        .config
+        .read()
+        .api_keys
+        .iter()
+        .find(|k| k.key_alias.as_deref() == Some(&alias))
+        .cloned()
+    {
+        new_cfg.models = orig.models;
+        new_cfg.allowed_providers = orig.allowed_providers;
+        new_cfg.rpm_limit = orig.rpm_limit;
+        new_cfg.tpm_limit = orig.tpm_limit;
+        new_cfg.max_parallel_requests = orig.max_parallel_requests;
+        new_cfg.max_budget = orig.max_budget;
+        new_cfg.budget_duration = orig.budget_duration;
+        new_cfg.expires = orig.expires;
+        new_cfg.soft_budget = orig.soft_budget;
+        new_cfg.allowed_model_region = orig.allowed_model_region;
+    }
+    // Swap in the new key: drop the old raw, add the new one (same alias).
+    state.auth.remove_by_raw(&old_raw);
+    state.auth.add(new_cfg.clone());
+    {
+        let mut w = state.config.write();
+        w.api_keys.retain(|k| k.key_alias.as_deref() != Some(&alias));
+        w.api_keys.push(new_cfg.clone());
+        if role == "admin" {
+            w.server.admin_token = Some(new_raw.clone());
+        }
+    }
+    let _ = state.save_to_disk();
+    let actor = actor_from_headers(&headers);
+    let detail = format!(r#"{{"alias":"{}","role":"{}"}}"#, alias, role);
+    let _ = state.storage.append_audit("key.rotate", &actor, &detail);
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "alias": alias,
+            "role": role,
+            "key": new_raw,
+        })),
+    )
+        .into_response()
 }
 
 async fn revoke_key_by_alias(
@@ -579,12 +728,51 @@ async fn put_model_list(
 async fn reload_config(
     State(state): State<SharedState>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ReloadQuery>,
 ) -> Response {
     let actor = actor_from_headers(&headers);
+    // `?from=path` stages a snapshot: validate it, write it over config.toml,
+    // then reload from the live file. The previous config.toml is backed up to
+    // `config.toml.bak` first so a bad swap is recoverable via /rollback.
+    if let Some(from) = &q.from {
+        let paths = crate::config::RouterPaths::discover();
+        let src = std::path::PathBuf::from(from);
+        if !src.exists() {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("snapshot not found: {from}"),
+            )
+                .into_response();
+        }
+        // Validate the snapshot parses before touching the live config.
+        match crate::config::load_from_path(&src) {
+            Ok(_) => {}
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("snapshot invalid: {e}"),
+                )
+                    .into_response()
+            }
+        }
+        // Back up the current live config as last-known-good.
+        let _ = std::fs::copy(&paths.config_file, paths.config_file.with_extension("toml.bak"));
+        // Stage the snapshot atomically (write tmp, rename over live).
+        match stage_snapshot(&src, &paths.config_file) {
+            Ok(_) => {}
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("stage failed: {e}"),
+                )
+                    .into_response()
+            }
+        }
+    }
     match state.reload_from_disk() {
         Ok(summary) => {
             let detail = format!(
-                r#"{{"keys":{},"upstreams":{},"status":"{}"}}"#,
+                r#"{{"keys":{},"upstreams":{},"status":"{}","from":"{}"}}"#,
                 summary.get("keys").and_then(|v| v.as_u64()).unwrap_or(0),
                 summary
                     .get("upstreams")
@@ -594,13 +782,18 @@ async fn reload_config(
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("reloaded"),
+                q.from.clone().unwrap_or_else(|| "disk".to_string()),
             );
-            let _ = state.storage.append_audit("config.reload", &actor, &detail);
+            let _ = state
+                .storage
+                .append_audit("config.reload", &actor, &detail);
             (axum::http::StatusCode::OK, Json(summary)).into_response()
         }
         Err(e) => {
             let detail = format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"));
-            let _ = state.storage.append_audit("config.reload", &actor, &detail);
+            let _ = state
+                .storage
+                .append_audit("config.reload", &actor, &detail);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
@@ -608,6 +801,67 @@ async fn reload_config(
                 .into_response()
         }
     }
+}
+
+/// POST /v1/admin/reload/rollback — restore the last-known-good backup
+/// (`config.toml.bak`) if present, then reload from it.
+async fn rollback_config(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let actor = actor_from_headers(&headers);
+    let paths = crate::config::RouterPaths::discover();
+    let bak = paths.config_file.with_extension("toml.bak");
+    if !bak.exists() {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            "no backup (config.toml.bak) available",
+        )
+            .into_response();
+    }
+    match state.reload_from_path(&bak) {
+        Ok(summary) => {
+            // Promote the backup to the live config so future reloads use it.
+            let _ = std::fs::copy(&bak, &paths.config_file);
+            let detail = format!(
+                r#"{{"status":"rolled_back","keys":{},"upstreams":{}}}"#,
+                summary.get("keys").and_then(|v| v.as_u64()).unwrap_or(0),
+                summary
+                    .get("upstreams")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            );
+            let _ = state
+                .storage
+                .append_audit("config.rollback", &actor, &detail);
+            (axum::http::StatusCode::OK, Json(summary)).into_response()
+        }
+        Err(e) => {
+            let detail = format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"));
+            let _ = state
+                .storage
+                .append_audit("config.rollback", &actor, &detail);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReloadQuery {
+    #[serde(default)]
+    pub from: Option<String>,
+}
+
+/// Write `src` over `dst` atomically: copy to a temp file next to `dst`, then rename.
+fn stage_snapshot(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let tmp = dst.with_extension("toml.staging");
+    std::fs::copy(src, &tmp)?;
+    std::fs::rename(&tmp, dst)?;
+    Ok(())
 }
 
 /// GET `/v1/admin/usage?group_by=alias|upstream|model|all&since=<unix>&until=<unix>`
@@ -682,6 +936,57 @@ async fn admin_usage_recent(
         })),
     )
         .into_response()
+}
+
+/// GET /v1/admin/usage/spend_history?alias=KEY&limit=168
+/// Per-key hourly spend history (budget-vs-actual trend). Admin only.
+async fn admin_spend_history(
+    State(state): State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<SpendHistoryQuery>,
+) -> Response {
+    let alias = match &q.alias {
+        Some(a) => a.clone(),
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "missing required query param 'alias'",
+            )
+                .into_response()
+        }
+    };
+    let limit = q.limit.unwrap_or(168).min(2000);
+    let rows = match state.storage.spend_history(&alias, limit) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{e}"),
+            )
+                .into_response()
+        }
+    };
+    let total_spend: f64 = rows.iter().map(|r| r.spend_usd).sum();
+    let total_requests: u64 = rows.iter().map(|r| r.requests).sum();
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "alias": alias,
+            "window": "1h",
+            "points": rows.len(),
+            "total_requests": total_requests,
+            "total_spend_usd": total_spend,
+            "history": rows,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct SpendHistoryQuery {
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -775,6 +1080,26 @@ async fn set_retention(
 #[derive(serde::Deserialize)]
 pub struct RetentionBody {
     pub days: u32,
+}
+
+/// POST /v1/admin/usage/retention/prune — immediately delete rows older than the
+/// configured retention window (no-op when retention = 0). Returns row count.
+async fn prune_usage_now(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let deleted = prune_retention(&state);
+    let actor = actor_from_headers(&headers);
+    let detail = format!(r#"{{"rows":{deleted}}}"#);
+    let _ = state.storage.append_audit("retention.prune", &actor, &detail);
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "deleted_rows": deleted,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /v1/admin/metrics  — JSON snapshot of counters, histograms, gauges.
@@ -879,6 +1204,49 @@ async fn admin_events_stream(State(state): State<SharedState>) -> Response {
         .unwrap()
 }
 
+/// Background task: every 60s, compute downsampled 1m rollups of the key
+/// cumulative counters (requests, tokens, cost, errors) and upsert them into
+/// `metric_rollups`. This gives long-term retention without an external TSDB:
+/// the dashboard can plot "requests/sec over the last 7 days" from these rows,
+/// while the live in-memory counters continue to hold the full-resolution
+/// 10s snapshots.
+pub fn spawn_rollup_task(state: SharedState) {
+    tokio::spawn(async move {
+        let initial = std::time::Duration::from_secs(60);
+        tokio::time::sleep(initial).await;
+        // Remember the last cumulative value seen for each counter so we store
+        // per-window deltas, not the running total.
+        let mut last: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        loop {
+            let now = chrono::Utc::now().timestamp();
+            let window_start = (now / 60) * 60;
+            // Pull the current snapshot values for the counters we roll up.
+            let snap = state.metrics.snapshot_json();
+            let counter_names = [
+                "requests_total",
+                "upstream_requests_total",
+                "success_total",
+                "error_total",
+                "input_tokens_total",
+                "output_tokens_total",
+                "cost_micros_total",
+            ];
+            for name in counter_names {
+                let current = snap
+                    .get(name)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let prev = *last.get(name).unwrap_or(&0);
+                let delta = current.saturating_sub(prev);
+                let _ = state
+                    .storage
+                    .record_rollup("1m", window_start, name, "{}", delta as i64);
+                last.insert(name.to_string(), current);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+}
 /// Background task: every 10s, snapshot all counters + histogram buckets and
 /// persist them to `metric_samples` so they survive a restart. Gauges are
 /// intentionally NOT persisted (transient by definition).
@@ -957,28 +1325,69 @@ pub fn spawn_budget_reset_task(state: SharedState) {
     });
 }
 
-/// Background task: once per day, delete `usage_events` rows older than
-/// `server.usage_retention_days`. No-op when retention = 0.
+/// Delete `usage_events` rows older than `server.usage_retention_days` (no-op
+/// when retention is 0). Returns the number of rows deleted.
+pub fn prune_retention(state: &SharedState) -> u64 {
+    let days = state.config.read().server.usage_retention_days;
+    if days == 0 {
+        return 0;
+    }
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86_400;
+    match state.storage.delete_events_older_than(cutoff) {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(rows = n, days, "pruned usage_events older than retention window");
+            }
+            n
+        }
+        Err(e) => {
+            tracing::warn!("retention prune failed: {e}");
+            0
+        }
+    }
+}
+
+/// Background task: prune `usage_events` rows older than `server.usage_retention_days`.
+/// When `server.usage_retention_hour` is set (0-23, local), the prune runs at that
+/// hour-of-day; otherwise it runs on a fixed 24h cadence starting 30s after boot.
 pub fn spawn_retention_task(state: SharedState) {
     tokio::spawn(async move {
         let initial = std::time::Duration::from_secs(30);
-        let interval = std::time::Duration::from_secs(24 * 60 * 60);
         tokio::time::sleep(initial).await;
         loop {
-            let days = state.config.read().server.usage_retention_days;
-            if days > 0 {
-                let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86_400;
-                match state.storage.delete_events_older_than(cutoff) {
-                    Ok(n) if n > 0 => tracing::info!(
-                        rows = n,
-                        days,
-                        "pruned usage_events older than retention window"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("retention prune failed: {e}"),
-                }
+            if state.config.read().server.usage_retention_hour.is_some() {
+                let now_local = chrono::Local::now();
+                let target = state
+                    .config
+                    .read()
+                    .server
+                    .usage_retention_hour
+                    .unwrap_or(0)
+                    .min(23) as u32;
+                let next = if now_local.hour() < target {
+                    now_local
+                        .date_naive()
+                        .and_hms_opt(target, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(chrono::Local)
+                        .unwrap()
+                } else {
+                    now_local
+                        .date_naive()
+                        .succ_opt()
+                        .unwrap()
+                        .and_hms_opt(target, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(chrono::Local)
+                        .unwrap()
+                };
+                let wait = (next - now_local).to_std().unwrap_or(std::time::Duration::from_secs(60));
+                tokio::time::sleep(wait).await;
+                prune_retention(&state);
+            } else {
+                prune_retention(&state);
+                tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
             }
-            tokio::time::sleep(interval).await;
         }
     });
 }
@@ -1063,6 +1472,49 @@ pub fn spawn_config_watcher(state: SharedState) {
 
 use std::sync::OnceLock;
 static WATCHER_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<()>> = OnceLock::new();
+
+/// Background task: at boot, fire a cheap `GET /v1/models` against each enabled
+/// upstream to pre-establish TCP/TLS connections (connection-pool warm-up), so
+/// the first real request doesn't pay the full connect latency. Failures are
+/// logged but otherwise ignored — this is purely a latency optimization.
+pub fn spawn_warmup_task(state: SharedState) {
+    tokio::spawn(async move {
+        // Small delay so the server has bound its listener first.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let upstreams: Vec<(String, String, String)> = state
+            .registry
+            .all()
+            .iter()
+            .filter(|u| u.enabled())
+            .map(|u| (u.id(), u.base_url(), u.api_key()))
+            .collect();
+        if upstreams.is_empty() {
+            return;
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        let client = match client {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("warmup client build failed: {e}");
+                return;
+            }
+        };
+        for (id, base, key) in upstreams {
+            let url = format!("{}/models", base.trim_end_matches('/'));
+            let res = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {key}"))
+                .send()
+                .await;
+            match res {
+                Ok(r) => tracing::info!(upstream = %id, status = r.status().as_u16(), "warmup probe ok"),
+                Err(e) => tracing::debug!(upstream = %id, "warmup probe failed: {e}"),
+            }
+        }
+    });
+}
 
 /// POST /v1/admin/metrics/reset
 /// Zero every in-memory counter, histogram, gauge, rate ring, and the trace ring.

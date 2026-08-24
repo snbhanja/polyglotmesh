@@ -17,6 +17,46 @@ impl ProviderKind {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn as_str_matches_serde_rename() {
+        assert_eq!(ProviderKind::Openai.as_str(), "openai");
+        assert_eq!(ProviderKind::Anthropic.as_str(), "anthropic");
+
+        let o = serde_json::to_string(&ProviderKind::Openai).unwrap();
+        assert_eq!(o, "\"openai\"");
+        let a: ProviderKind = serde_json::from_str("\"anthropic\"").unwrap();
+        assert_eq!(a, ProviderKind::Anthropic);
+    }
+
+    #[test]
+    fn config_defaults_are_sane() {
+        let c = Config::default();
+        assert_eq!(c.server.bind, "0.0.0.0:8080");
+        assert!(c.upstreams.is_empty());
+        assert_eq!(c.queue.queue_wait_timeout_ms, 30_000);
+        assert_eq!(c.queue.healthcheck_failure_threshold, 3);
+    }
+
+    #[test]
+    fn model_cost_round_trips() {
+        let mc = ModelCost {
+            input_cost_per_token: Some(1.0e-6),
+            output_cost_per_token: Some(2.0e-6),
+            max_input_tokens: Some(1000),
+            max_output_tokens: Some(500),
+            cache_read_input_token_cost: None,
+            cache_creation_input_token_cost: None,
+        };
+        let json = serde_json::to_string(&mc).unwrap();
+        let back: ModelCost = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mc);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub id: String,
@@ -66,6 +106,34 @@ pub struct UpstreamConfig {
     /// Custom tag-based routing tags (LiteLLM's `tags`).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// When true, the router is considered unhealthy (`/healthz?strict=1` → 503)
+    /// if this upstream is not usable. Use for must-be-up providers.
+    #[serde(default)]
+    pub critical: bool,
+    /// Optional circuit breaker. When consecutive failures hit `failure_threshold`,
+    /// the upstream is marked `unhealthy` (rejects traffic) for `open_duration_s`,
+    /// then probed once (half-open). Unset = use the global default threshold (3).
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
+/// Per-upstream circuit breaker settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive failures before the breaker opens.
+    #[serde(default = "default_fail_threshold")]
+    pub failure_threshold: u32,
+    /// Seconds to stay open (rejecting traffic) before a half-open probe.
+    #[serde(default = "default_open_duration_s")]
+    pub open_duration_s: u64,
+}
+
+fn default_fail_threshold() -> u32 {
+    3
+}
+
+fn default_open_duration_s() -> u64 {
+    30
 }
 
 fn default_timeout_ms() -> u64 {
@@ -75,7 +143,20 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Default for ModelCost {
+    fn default() -> Self {
+        Self {
+            input_cost_per_token: None,
+            output_cost_per_token: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            cache_read_input_token_cost: None,
+            cache_creation_input_token_cost: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCost {
     #[serde(default)]
     pub input_cost_per_token: Option<f64>,
@@ -109,6 +190,21 @@ pub struct ServerConfig {
     /// A background task prunes rows older than this once per day.
     #[serde(default)]
     pub usage_retention_days: u32,
+    /// Hour of day (0-23, local) at which the retention prune runs, instead of
+    /// the default fixed 24h cadence. `None` (default) keeps the simple daily loop.
+    #[serde(default)]
+    pub usage_retention_hour: Option<u8>,
+    /// Graceful-shutdown drain timeout in seconds. On SIGTERM/SIGINT the server
+    /// stops accepting new connections and waits this long for in-flight
+    /// requests to finish before exiting. Default 30s.
+    #[serde(default)]
+    pub drain_timeout_s: Option<u64>,
+    /// Trace sampling ratio (0.0–1.0). Fraction of requests that get a trace
+    /// span recorded into the in-memory ring. 1.0 = record all (default),
+    /// 0.1 = record ~10%. Useful for trading trace fidelity for retention
+    /// under heavy load.
+    #[serde(default)]
+    pub trace_sample_ratio: Option<f64>,
 }
 
 fn default_bind() -> String {
@@ -134,7 +230,7 @@ pub struct ModelListEntry {
 }
 
 /// A self-issued key, with LiteLLM-style limit fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiKeyConfig {
     /// The raw key (hashed internally at runtime). Either `key` or `key_alias` is required.
     #[serde(default)]
@@ -178,6 +274,11 @@ pub struct ApiKeyConfig {
     /// Whether this key is blocked.
     #[serde(default)]
     pub blocked: bool,
+    /// Optional IP allowlist, as CIDR strings (e.g. "10.0.0.0/8", "203.0.113.5/32").
+    /// Empty = allow from any address. Enforced against the client IP in the
+    /// auth middleware (X-Forwarded-For, then socket address).
+    #[serde(default)]
+    pub allowed_cidrs: Vec<String>,
 }
 
 fn default_role_api() -> String {
@@ -261,6 +362,9 @@ impl Default for Config {
                 global_max_parallel_requests: None,
                 max_request_size_mb: None,
                 usage_retention_days: 0,
+                usage_retention_hour: None,
+                drain_timeout_s: None,
+                trace_sample_ratio: None,
             },
             api_keys: Vec::new(),
             api_keys_legacy: Vec::new(),

@@ -81,6 +81,12 @@ enum Cmd {
         region: Option<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        critical: bool,
+        #[arg(long, default_value_t = 0)]
+        circuit_breaker_threshold: u32,
+        #[arg(long, default_value_t = 0)]
+        circuit_breaker_open_s: u64,
     },
     /// Remove an upstream by id.
     UpstreamRemove {
@@ -98,6 +104,16 @@ enum Cmd {
         /// Override bind address.
         #[arg(long)]
         bind: Option<String>,
+    },
+    /// Diagnostic check: parse config, probe each upstream with a /v1/models
+    /// GET (short timeout), and print a per-upstream health report.
+    Doctor {
+        /// Skip the live network probe of upstreams.
+        #[arg(long, default_value_t = false)]
+        no_probe: bool,
+        /// Probe timeout in milliseconds.
+        #[arg(long, default_value_t = 3000)]
+        timeout_ms: u64,
     },
 }
 
@@ -146,6 +162,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ref budget_duration,
             ref region,
             ref tags,
+            ref critical,
+            ref circuit_breaker_threshold,
+            ref circuit_breaker_open_s,
         } => cmd_upstream_add(
             &cli,
             id.clone(),
@@ -163,6 +182,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             budget_duration.clone(),
             region.clone(),
             tags.clone(),
+            *critical,
+            *circuit_breaker_threshold,
+            *circuit_breaker_open_s,
         ),
         Cmd::UpstreamRemove { ref id } => cmd_upstream_remove(&cli, &id),
         Cmd::UpstreamList => cmd_upstream_list(&cli),
@@ -173,6 +195,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Serve { ref bind } => cmd_serve(&cli, bind.clone()).await,
+        Cmd::Doctor {
+            no_probe,
+            timeout_ms,
+        } => cmd_doctor(&cli, no_probe, timeout_ms).await,
     }
 }
 
@@ -255,6 +281,9 @@ fn cmd_upstream_add(
     budget_duration: Option<String>,
     region: Option<String>,
     tags: Vec<String>,
+    critical: bool,
+    circuit_breaker_threshold: u32,
+    circuit_breaker_open_s: u64,
 ) -> anyhow::Result<()> {
     let (path, mut cfg) = load_config(cli).context("load config")?;
     cfg.upstreams.retain(|u| u.id != id);
@@ -282,6 +311,23 @@ fn cmd_upstream_add(
         region,
         tags,
         enabled: true,
+        critical,
+        circuit_breaker: if circuit_breaker_threshold > 0 || circuit_breaker_open_s > 0 {
+            Some(crate::config::types::CircuitBreakerConfig {
+                failure_threshold: if circuit_breaker_threshold > 0 {
+                    circuit_breaker_threshold
+                } else {
+                    3
+                },
+                open_duration_s: if circuit_breaker_open_s > 0 {
+                    circuit_breaker_open_s
+                } else {
+                    30
+                },
+            })
+        } else {
+            None
+        },
     });
     save_config(&path, &cfg)?;
     println!("Upstream '{id}' saved to {}", path.display());
@@ -360,6 +406,13 @@ async fn cmd_serve(cli: &Cli, bind_override: Option<String>) -> anyhow::Result<(
             "warning: no upstreams configured. Add some with `polyglotmesh upstream add ...`"
         );
     }
+    // Back up the current config as last-known-good before serving, so a bad
+    // live edit can be reverted via `POST /v1/admin/reload/rollback`.
+    let paths = crate::config::RouterPaths::discover();
+    if paths.config_file.exists() {
+        let _ = std::fs::copy(&paths.config_file, paths.config_file.with_extension("toml.bak"));
+    }
+
     let state = Arc::new(AppState::from_config(cfg.clone()));
 
     let app = build_router(state.clone());
@@ -368,6 +421,8 @@ async fn cmd_serve(cli: &Cli, bind_override: Option<String>) -> anyhow::Result<(
     admin::spawn_retention_task(state.clone());
     admin::spawn_budget_reset_task(state.clone());
     admin::spawn_metrics_persister(state.clone());
+    admin::spawn_warmup_task(state.clone());
+    admin::spawn_rollup_task(state.clone());
 
     let addr: SocketAddr = cfg
         .server
@@ -378,8 +433,124 @@ async fn cmd_serve(cli: &Cli, bind_override: Option<String>) -> anyhow::Result<(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
+    let state_clone = state.clone();
     let _ = state;
-    axum::serve(listener, app).await.context("axum::serve")?;
+
+    // Provide client socket addresses to handlers/middleware (for per-key
+    // allowed_cidrs enforcement) via ConnectInfo.
+    let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    // Graceful shutdown: on SIGTERM/SIGINT, stop accepting new connections and
+    // let in-flight requests drain for up to `drain_timeout_s` (default 30s),
+    // then flush metrics to disk before exiting.
+    let drain = std::time::Duration::from_secs(cfg.server.drain_timeout_s.unwrap_or(30));
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let ctrl_c = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            #[cfg(unix)]
+            let terminate = async {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(mut sig) => {
+                        sig.recv().await;
+                    }
+                    Err(_) => std::future::pending::<()>().await,
+                }
+            };
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<()>();
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = terminate => {},
+            }
+            tracing::info!("shutdown signal received; draining in-flight requests");
+            tokio::time::sleep(drain).await;
+            let _ = state_clone.save_to_disk();
+        })
+        .await
+        .context("axum::serve")?;
+    Ok(())
+}
+
+async fn cmd_doctor(cli: &Cli, no_probe: bool, timeout_ms: u64) -> anyhow::Result<()> {
+    let (path, cfg) = load_config(cli).context("load config")?;
+    println!("config: {}", path.display());
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+
+    if cfg.api_keys.is_empty() && cfg.api_keys_legacy.is_empty() {
+        println!("[WARN] no API keys configured (clients cannot authenticate)");
+        warnings += 1;
+    }
+    if cfg.upstreams.is_empty() {
+        println!("[WARN] no upstreams configured (router will reject all requests)");
+        warnings += 1;
+    }
+    if cfg.server.admin_token.is_none() {
+        println!("[WARN] no admin_token set (admin endpoints unusable)");
+        warnings += 1;
+    }
+
+    println!();
+    println!("upstreams: {}", cfg.upstreams.len());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .context("build probe client")?;
+
+    for u in &cfg.upstreams {
+        let url = format!("{}/models", u.base_url.trim_end_matches('/'));
+        let mut line = format!(
+            "  - {} [{:?}] {} critical={} enabled={}",
+            u.id, u.kind, u.base_url, u.critical, u.enabled
+        );
+        if u.models.is_empty() {
+            line.push_str(" (no models declared)");
+            warnings += 1;
+        }
+        if u.enabled {
+            if no_probe {
+                line.push_str(" [probe skipped]");
+            } else {
+                let start = std::time::Instant::now();
+                let res = client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", u.api_key))
+                    .send()
+                    .await;
+                let elapsed = start.elapsed();
+                match res {
+                    Ok(r) if r.status().is_success() => {
+                        line.push_str(&format!(" OK {}ms", elapsed.as_millis()));
+                    }
+                    Ok(r) => {
+                        line.push_str(&format!(
+                            " HTTP {} {}ms",
+                            r.status().as_u16(),
+                            elapsed.as_millis()
+                        ));
+                        errors += 1;
+                    }
+                    Err(e) => {
+                        line.push_str(&format!(" ERR {e}"));
+                        errors += 1;
+                    }
+                }
+            }
+        } else {
+            line.push_str(" [disabled]");
+        }
+        println!("{line}");
+    }
+
+    println!();
+    if errors > 0 {
+        println!("RESULT: {} error(s), {} warning(s)", errors, warnings);
+        anyhow::bail!("doctor found {} error(s)", errors);
+    } else {
+        println!("RESULT: OK ({} warning(s))", warnings);
+    }
     Ok(())
 }
 
@@ -410,4 +581,30 @@ use axum::response::IntoResponse;
 async fn dashboard() -> impl IntoResponse {
     const HTML: &str = include_str!("../static/dashboard.html");
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], HTML)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_is_unchanged() {
+        assert_eq!(truncate("short", 36), "short");
+        assert_eq!(truncate("", 36), "");
+    }
+
+    #[test]
+    fn truncate_long_string_gets_ellipsis() {
+        let s = "https://example.com/a/very/long/base/url/path/that/should/be/cut";
+        let out = truncate(s, 36);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 36);
+        assert!(s.starts_with(&out[..out.char_indices().nth(35).unwrap().0]));
+    }
+
+    #[test]
+    fn truncate_at_zero_is_safe() {
+        let out = truncate("abc", 0);
+        assert_eq!(out, "…");
+    }
 }

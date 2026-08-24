@@ -48,6 +48,7 @@ sha2 = "0.11"
 hex = "0.4"
 rand = "0.9"
 url = "2"
+ipnet = "2"
 clap = { version = "4", features = ["derive", "env"] }
 config = { version = "0.15", default-features = false, features = ["toml", "yaml"] }
 toml = "1.1"

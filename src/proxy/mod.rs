@@ -227,12 +227,48 @@ pub async fn auth_middleware(
     mut req: Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let rec = match state.authorize(req.headers()) {
+    let client_ip = client_ip(&req);
+    let rec = match state.authorize(req.headers(), client_ip) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
     req.extensions_mut().insert(rec);
     next.run(req).await
+}
+
+/// Best-effort client IP: prefer the first `X-Forwarded-For` entry (trusted
+/// proxy), then a `ConnectInfo<SocketAddr>` extension if the server was bound
+/// with `.into_make_service_with_connect_info`. Returns `None` if unavailable.
+pub fn client_ip(req: &Request) -> Option<std::net::IpAddr> {
+    if let Some(xff) = req.headers().get(axum::http::header::FORWARDED) {
+        // `Forwarded: for=1.2.3.4` style
+        if let Ok(s) = xff.to_str() {
+            for part in s.split(';') {
+                if let Some(for_part) = part.trim().strip_prefix("for=") {
+                    let v = for_part.trim_matches('"').trim_matches('[').trim_matches(']');
+                    // strip optional port
+                    let v = v.split(':').next().unwrap_or(v);
+                    if let Ok(ip) = v.parse::<std::net::IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(xff) = req.headers().get("x-forwarded-for") {
+        if let Ok(s) = xff.to_str() {
+            let first = s.split(',').next().unwrap_or("").trim();
+            let first = first.split(':').next().unwrap_or(first).trim();
+            if let Ok(ip) = first.parse::<std::net::IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+    if let Some(connect) = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        return Some(connect.0.ip());
+    }
+    None
 }
 
 fn get_key_from_parts(parts: &axum::http::request::Parts) -> Option<Arc<KeyRecord>> {
@@ -384,6 +420,29 @@ pub fn spawn_stream_usage_watcher(
             model.as_deref(),
             200,
         );
+        // Mirror the in-memory metric counters that `RequestTimer::finalize`
+        // normally writes for non-stream success; for streams the finalize
+        // call only has token/cost = 0, so the totals would otherwise miss
+        // streamed usage.
+        let model_str = model.as_deref().unwrap_or("").to_string();
+        let labels = vec![
+            ("upstream_id", upstream_id.clone()),
+            ("model", model_str.clone()),
+        ];
+        state.metrics.input_tokens_total.inc(labels.clone(), in_t);
+        state.metrics.output_tokens_total.inc(labels.clone(), out_t);
+        state.metrics.cost_micros_total.inc(
+            labels.clone(),
+            (cost * 1_000_000.0) as u64,
+        );
+        state.metrics.success_total.inc(labels.clone(), 1);
+        state
+            .metrics
+            .upstream_requests_total
+            .inc(labels, 1);
+        state
+            .metrics
+            .record_request(in_t + out_t, cost);
     });
 }
 
@@ -1009,17 +1068,38 @@ async fn forward_anthropic(
     ))
 }
 
-pub async fn health(State(state): State<SharedState>) -> Response {
+#[derive(serde::Deserialize)]
+pub struct HealthQuery {
+    /// When `strict=1`, the response is 503 if any upstream flagged `critical`
+    /// in config is not usable (disabled, paused, or unhealthy).
+    #[serde(default)]
+    pub strict: Option<u8>,
+}
+
+pub async fn health(
+    State(state): State<SharedState>,
+    axum::extract::Query(q): axum::extract::Query<HealthQuery>,
+) -> Response {
     let ups: Vec<Arc<crate::upstream::Upstream>> = state.registry.all();
     let keys: Vec<serde_json::Value> = state.auth.all_keys().iter().map(|k| k.snapshot()).collect();
+    let critical_down: Vec<String> = ups
+        .iter()
+        .filter(|u| u.cfg.read().critical && !u.is_usable())
+        .map(|u| u.id())
+        .collect();
+    let strict = q.strict.unwrap_or(0) == 1;
+    let ok = !strict || critical_down.is_empty();
     let body = serde_json::json!({
-        "status": "ok",
+        "status": if ok { "ok" } else { "degraded" },
+        "strict": strict,
+        "critical_down": critical_down,
         "upstreams": ups.iter().map(|u| u.snapshot()).collect::<Vec<_>>(),
         "queue": state.queue.stats.snapshot(),
         "pending": state.queue.pending_snapshot(),
         "keys": keys,
     });
-    (StatusCode::OK, axum::Json(body)).into_response()
+    let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (code, axum::Json(body)).into_response()
 }
 
 fn filter_upstreams_for_model(

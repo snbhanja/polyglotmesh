@@ -350,6 +350,10 @@ pub struct Metrics {
 
     // Live event bus for SSE dashboard tail
     pub events: EventBus,
+
+    /// Trace sampling ratio (0.0–1.0), stored as ratio × 1e6 in a relaxed atomic
+    /// so it can be read lock-free on the hot path. 1_000_000 = sample everything.
+    pub trace_sample_ratio: AtomicU64,
 }
 
 impl Metrics {
@@ -427,12 +431,34 @@ impl Metrics {
             rates: parking_lot::RwLock::new(Rates::new()),
             traces: TraceRing::new(1000),
             events: EventBus::new(),
+            trace_sample_ratio: AtomicU64::new(1_000_000),
         })
     }
 
-    /// Record one trace span.
+    /// Record one trace span. Honors the configured `trace_sample_ratio`:
+    /// if the span's id (a stable per-request hash) falls outside the sampled
+    /// fraction, it is dropped. With ratio = 1.0 (default) every span is kept.
     pub fn record_trace(&self, span: TraceSpan) {
-        self.traces.push(span);
+        let ratio = (self.trace_sample_ratio.load(Ordering::Relaxed) as f64) / 1_000_000.0;
+        if ratio >= 1.0 {
+            self.traces.push(span);
+            return;
+        }
+        if ratio <= 0.0 {
+            return;
+        }
+        // Deterministic per-span sampling using the span id as the random source.
+        let id_num = u64::from_str_radix(span.span_id.trim_start_matches("0x"), 16).unwrap_or(0);
+        if (id_num % 1_000_000) as f64 <= ratio * 1_000_000.0 {
+            self.traces.push(span);
+        }
+    }
+
+    /// Set the trace sampling ratio (0.0–1.0). Clamped to [0, 1].
+    pub fn set_trace_sample_ratio(&self, ratio: f64) {
+        let r = ratio.clamp(0.0, 1.0);
+        self.trace_sample_ratio
+            .store((r * 1_000_000.0) as u64, Ordering::Relaxed);
     }
 
     /// Record one finished request with its token counts + cost.
@@ -674,6 +700,61 @@ impl Metrics {
                 ));
             }
         }
+        // Sliding-window rate gauges (RPS / TPS / cost-per-sec over 1m/5m/1h).
+        let rates = self.rates.read();
+        let r = rates.snapshot();
+        let emit_rate = |out: &mut String, name: &str, help: &str, value: f64| {
+            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+            out.push_str(&format!("{name} {value}\n"));
+        };
+        emit_rate(
+            &mut out,
+            "requests_per_second",
+            "Rolling request rate (avg per second) over the window.",
+            r["rps"]["1m"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "requests_per_second_5m",
+            "Rolling request rate (avg per second) over 5 minutes.",
+            r["rps"]["5m"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "requests_per_second_1h",
+            "Rolling request rate (avg per second) over 1 hour.",
+            r["rps"]["1h"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "tokens_per_second",
+            "Rolling token rate (avg per second) over 1 minute.",
+            r["tps"]["1m"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "tokens_per_second_5m",
+            "Rolling token rate (avg per second) over 5 minutes.",
+            r["tps"]["5m"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "tokens_per_second_1h",
+            "Rolling token rate (avg per second) over 1 hour.",
+            r["tps"]["1h"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "cost_per_second",
+            "Rolling spend rate (USD per second) over 1 minute.",
+            r["cost_per_sec"]["1m"].as_f64().unwrap_or(0.0),
+        );
+        emit_rate(
+            &mut out,
+            "cost_per_second_1h",
+            "Rolling spend rate (USD per second) over 1 hour.",
+            r["cost_per_sec"]["1h"].as_f64().unwrap_or(0.0),
+        );
         out
     }
 }

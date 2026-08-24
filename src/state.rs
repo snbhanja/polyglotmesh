@@ -60,6 +60,10 @@ impl AppState {
             .expect("build reqwest client");
 
         let metrics = Metrics::new();
+        // Apply configured trace sampling ratio (if set).
+        if let Some(r) = cfg.server.trace_sample_ratio {
+            metrics.set_trace_sample_ratio(r);
+        }
         // Rehydrate persisted counter + histogram values from SQLite.
         // Block briefly on the storage lock to read persisted samples.
         // Acceptable at startup: it is the only time we serialize on the DB.
@@ -115,7 +119,12 @@ impl AppState {
     /// Reload config from disk: rebuild registry, refresh auth store, restore counters.
     pub fn reload_from_disk(&self) -> RouterResult<serde_json::Value> {
         let paths = crate::config::RouterPaths::discover();
-        let cfg = crate::config::load_from_path(&paths.config_file)?;
+        self.reload_from_path(&paths.config_file)
+    }
+
+    /// Reload config from an explicit path (used by config rollback from a backup).
+    pub fn reload_from_path(&self, path: &std::path::Path) -> RouterResult<serde_json::Value> {
+        let cfg = crate::config::load_from_path(path)?;
 
         // Rebuild registry in place.
         let existing_ids: Vec<String> = self.registry.all().iter().map(|u| u.id()).collect();
@@ -144,6 +153,11 @@ impl AppState {
             if let Ok(row) = self.storage.get_key_usage(&rec.alias) {
                 restore_usage(&rec, &row);
             }
+        }
+
+        // Apply configured trace sampling ratio (if changed).
+        if let Some(r) = cfg.server.trace_sample_ratio {
+            self.metrics.set_trace_sample_ratio(r);
         }
 
         *self.config.write() = cfg.clone();
@@ -198,8 +212,9 @@ impl AppState {
     pub fn authorize(
         &self,
         headers: &axum::http::HeaderMap,
+        client_ip: Option<std::net::IpAddr>,
     ) -> Result<Arc<crate::auth::KeyRecord>, crate::error::RouterError> {
-        let rec = crate::auth::authorize(headers, &self.auth)?;
+        let rec = crate::auth::authorize(headers, &self.auth, client_ip)?;
         // Persist the rolling RPM window so it survives restarts.
         if rec.rpm_limit > 0 {
             if let Err(e) = self.storage.update_rpm_window(&rec.alias, 60) {
@@ -240,6 +255,22 @@ impl AppState {
             Some(&event),
         ) {
             tracing::debug!("counter delta persist failed for {}: {e}", rec.alias);
+        }
+        // Record a per-key spend-history bucket (hourly) for trend charts.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = self.storage.record_spend_history(
+            &rec.alias,
+            now,
+            3600,
+            input_tokens as i64,
+            output_tokens as i64,
+            cost_usd,
+            1,
+        ) {
+            tracing::debug!("spend history persist failed for {}: {e}", rec.alias);
         }
         // Persist updated TPM window (rolling minute-bucket of total tokens).
         let total_tokens = (input_tokens + output_tokens) as u32;

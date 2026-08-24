@@ -39,6 +39,9 @@ pub struct Upstream {
     pub models: RwLock<Vec<String>>,
     /// Whether the upstream is paused by an admin.
     pub paused: AtomicBool,
+    /// Circuit breaker: when open, the breaker rejects traffic until this
+    /// instant passes (then a single half-open probe is allowed).
+    pub breaker_open_until: RwLock<Option<std::time::Instant>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +81,7 @@ impl Upstream {
             failure_count: AtomicU64::new(0),
             models: RwLock::new(cfg.models.clone()),
             paused: AtomicBool::new(false),
+            breaker_open_until: RwLock::new(None),
         })
     }
 
@@ -122,6 +126,13 @@ impl Upstream {
         }
         if !self.health().allows_traffic() {
             return false;
+        }
+        // Circuit breaker: if open and still within the open window, reject.
+        let open = *self.breaker_open_until.read();
+        if let Some(until) = open {
+            if Instant::now() < until {
+                return false;
+            }
         }
         let cfg = self.cfg.read();
         if cfg.max_concurrency > 0 && self.in_flight.load(Ordering::Relaxed) >= cfg.max_concurrency
@@ -181,21 +192,28 @@ impl Upstream {
         self.success_count.fetch_add(1, Ordering::Relaxed);
         self.consecutive_failures.store(0, Ordering::Relaxed);
         *self.last_success.write() = Some(Instant::now());
+        *self.breaker_open_until.write() = None;
         let mut h = self.health.write();
         if *h != Health::Healthy {
             *h = Health::Healthy;
         }
     }
 
+    /// Record a failed request. Opens the circuit breaker once consecutive
+    /// failures reach the configured (or default) threshold, rejecting traffic
+    /// for `open_duration_s`, after which a single half-open probe is allowed.
     pub fn record_failure(&self) {
         self.failure_count.fetch_add(1, Ordering::Relaxed);
         let f = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        let threshold = std::env::var("AI_LLM_ROUTER_FAIL_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(3);
+        let cfg = self.cfg.read();
+        let (threshold, open_s) = match &cfg.circuit_breaker {
+            Some(cb) => (cb.failure_threshold, cb.open_duration_s),
+            None => (3u32, 30u64),
+        };
         if f >= threshold {
             *self.health.write() = Health::Unhealthy;
+            let until = Instant::now() + std::time::Duration::from_secs(open_s);
+            *self.breaker_open_until.write() = Some(until);
         } else if f >= (threshold / 2 + 1) {
             *self.health.write() = Health::Degraded;
         }
@@ -212,6 +230,7 @@ impl Upstream {
             "priority": cfg.priority,
             "weight": cfg.weight,
             "enabled": cfg.enabled,
+            "critical": cfg.critical,
             "paused": self.paused.load(Ordering::Relaxed),
             "health": self.health(),
             "in_flight": self.in_flight.load(Ordering::Relaxed),
@@ -490,5 +509,181 @@ impl Upstream {
         &self,
     ) -> std::collections::BTreeMap<String, crate::config::types::ModelCost> {
         self.cfg.read().model_info.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{ModelCost, ProviderKind, UpstreamConfig};
+    use std::collections::BTreeMap;
+
+    fn upstream_cfg(id: &str, kind: ProviderKind, priority: i32, max_concurrency: u32) -> UpstreamConfig {
+        UpstreamConfig {
+            id: id.into(),
+            name: None,
+            kind,
+            base_url: "https://example.com".into(),
+            api_key: "k".into(),
+            priority,
+            models: vec![],
+            weight: 1,
+            timeout_ms: 60_000,
+            max_concurrency,
+            rate_limit_rpm: 0,
+            rate_limit_tpm: 0,
+            enabled: true,
+            max_budget: None,
+            budget_duration: None,
+            model_info: BTreeMap::new(),
+            region: None,
+            tags: vec![],
+            critical: false,
+            circuit_breaker: None,
+        }
+    }
+
+    #[test]
+    fn cost_for_unknown_model_reports_unknown() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Openai, 0, 0));
+        let (cost, unknown) = u.cost_for(Some("some-unknown-model"), 1000, 1000);
+        assert!(unknown);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn cost_for_uses_builtin_price_table() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Openai, 0, 0));
+        // gpt-4o: $2.5/M in, $10/M out.
+        let (cost, unknown) = u.cost_for(Some("gpt-4o"), 1_000_000, 1_000_000);
+        assert!(!unknown);
+        assert!((cost - 12.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_for_prefers_per_upstream_override() {
+        let mut cfg = upstream_cfg("u", ProviderKind::Openai, 0, 0);
+        let mut info = BTreeMap::new();
+        info.insert(
+            "gpt-4o".into(),
+            ModelCost {
+                input_cost_per_token: Some(1.0e-6),
+                output_cost_per_token: Some(1.0e-6),
+                max_input_tokens: None,
+                max_output_tokens: None,
+                cache_read_input_token_cost: None,
+                cache_creation_input_token_cost: None,
+            },
+        );
+        cfg.model_info = info;
+        let u = Upstream::from_config(cfg);
+        let (cost, unknown) = u.cost_for(Some("gpt-4o"), 1_000_000, 1_000_000);
+        assert!(!unknown);
+        assert!((cost - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn default_price_strips_provider_prefix_and_suffix() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Anthropic, 0, 0));
+        // "openai/gpt-4o" and "gpt-4o:latest" should both resolve to gpt-4o pricing.
+        let (c1, _) = u.cost_for(Some("openai/gpt-4o"), 1_000_000, 0);
+        let (c2, _) = u.cost_for(Some("gpt-4o:latest"), 1_000_000, 0);
+        assert!((c1 - 2.5).abs() < 1e-9);
+        assert!((c2 - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_model_info_merge_and_replace() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Openai, 0, 0));
+        let mut a = BTreeMap::new();
+        a.insert("m1".into(), ModelCost::default());
+        u.set_model_info(a.clone(), false);
+        assert_eq!(u.model_info().len(), 1);
+
+        let mut b = BTreeMap::new();
+        b.insert("m2".into(), ModelCost::default());
+        u.set_model_info(b, true);
+        // merge keeps m1 and adds m2
+        assert_eq!(u.model_info().len(), 2);
+
+        let mut c = BTreeMap::new();
+        c.insert("m3".into(), ModelCost::default());
+        u.set_model_info(c, false);
+        assert_eq!(u.model_info().len(), 1);
+    }
+
+    #[test]
+    fn try_acquire_respects_concurrency_and_release() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Openai, 0, 1));
+        assert!(u.try_acquire());
+        // second acquire should fail: concurrency exhausted
+        assert!(!u.try_acquire());
+        u.release();
+        assert!(u.try_acquire());
+        u.release();
+    }
+
+    #[test]
+    fn is_usable_reflects_enabled_paused_health() {
+        let u = Upstream::from_config(upstream_cfg("u", ProviderKind::Openai, 0, 0));
+        assert!(u.is_usable());
+
+        *u.health.write() = Health::Unhealthy;
+        assert!(!u.is_usable());
+        *u.health.write() = Health::Degraded;
+        assert!(u.is_usable());
+
+        *u.health.write() = Health::Healthy;
+        u.paused.store(true, Ordering::Relaxed);
+        assert!(!u.is_usable());
+        u.paused.store(false, Ordering::Relaxed);
+
+        let mut cfg = u.cfg.write();
+        cfg.enabled = false;
+        drop(cfg);
+        assert!(!u.is_usable());
+    }
+
+    #[test]
+    fn registry_sorts_by_priority_then_id() {
+        let reg = UpstreamRegistry::rebuild(vec![
+            upstream_cfg("b", ProviderKind::Openai, 1, 0),
+            upstream_cfg("a", ProviderKind::Openai, 1, 0),
+            upstream_cfg("c", ProviderKind::Openai, 5, 0),
+        ]);
+        let all = reg.by_provider(ProviderKind::Openai);
+        let ids: Vec<String> = all.iter().map(|u| u.id()).collect();
+        // highest priority first; ties broken by id ascending
+        assert_eq!(ids, vec!["c".to_string(), "a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn registry_upsert_remove_and_by_provider() {
+        let reg = UpstreamRegistry::new();
+        reg.upsert(upstream_cfg("oai1", ProviderKind::Openai, 0, 0));
+        reg.upsert(upstream_cfg("ant1", ProviderKind::Anthropic, 0, 0));
+        assert_eq!(reg.by_provider(ProviderKind::Openai).len(), 1);
+        assert!(reg.get("oai1").is_some());
+        assert!(reg.remove("oai1"));
+        assert!(reg.get("oai1").is_none());
+        assert_eq!(reg.by_provider(ProviderKind::Openai).len(), 0);
+    }
+
+    #[test]
+    fn known_models_merges_configured_and_priced() {
+        let mut cfg = upstream_cfg("u", ProviderKind::Openai, 0, 0);
+        cfg.models = vec!["gpt-4o".into()];
+        let mut info = BTreeMap::new();
+        info.insert("custom-model".into(), ModelCost::default());
+        cfg.model_info = info;
+        let u = Upstream::from_config(cfg);
+        let models = u.known_models();
+        assert!(models.contains(&"custom-model".to_string()));
+        assert!(models.contains(&"gpt-4o".to_string()));
+        // sorted
+        let sorted = models.clone();
+        let mut check = sorted.clone();
+        check.sort();
+        assert_eq!(models, check);
     }
 }

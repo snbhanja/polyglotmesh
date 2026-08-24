@@ -65,3 +65,86 @@ impl RouterPaths {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{Config, ProviderKind, UpstreamConfig};
+
+    #[test]
+    fn missing_file_loads_default() {
+        let cfg = load_from_path("/nonexistent/path/config.toml").unwrap();
+        assert_eq!(cfg.server.bind, "0.0.0.0:8080");
+        assert!(cfg.upstreams.is_empty());
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_upstreams() {
+        let dir = std::env::temp_dir().join(format!("pgm_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.api_keys_legacy.push("pgm-abc".into());
+        cfg.upstreams.push(UpstreamConfig {
+            id: "oai".into(),
+            name: None,
+            kind: ProviderKind::Openai,
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "sk".into(),
+            priority: 5,
+            models: vec!["gpt-4o".into()],
+            weight: 1,
+            timeout_ms: 60_000,
+            max_concurrency: 0,
+            rate_limit_rpm: 0,
+            rate_limit_tpm: 0,
+            enabled: true,
+            max_budget: None,
+            budget_duration: None,
+            model_info: Default::default(),
+            region: None,
+            tags: vec![],
+            critical: false,
+            circuit_breaker: None,
+        });
+
+        save_to_path(&path, &cfg).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+        assert_eq!(loaded.api_keys_legacy, vec!["pgm-abc".to_string()]);
+        assert_eq!(loaded.upstreams.len(), 1);
+        assert_eq!(loaded.upstreams[0].id, "oai");
+        assert_eq!(loaded.upstreams[0].kind, ProviderKind::Openai);
+        assert_eq!(loaded.upstreams[0].priority, 5);
+        assert_eq!(loaded.upstreams[0].models, vec!["gpt-4o".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn json_round_trip_preserves_bind() {
+        let dir = std::env::temp_dir().join(format!("pgm_test_json_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let mut cfg = Config::default();
+        cfg.server.bind = "127.0.0.1:9000".into();
+        save_to_path(&path, &cfg).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+        assert_eq!(loaded.server.bind, "127.0.0.1:9000");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn router_paths_honor_env_and_default() {
+        std::env::set_var("POLYGLOTMESH_HOME", "/tmp/pgmhome");
+        let p = RouterPaths::discover();
+        assert_eq!(p.config_file, std::path::PathBuf::from("/tmp/pgmhome/config.toml"));
+        assert_eq!(p.state_file, std::path::PathBuf::from("/tmp/pgmhome/state.json"));
+        std::env::remove_var("POLYGLOTMESH_HOME");
+
+        let default = RouterPaths::discover();
+        assert!(default.config_file.ends_with(".polyglotmesh/config.toml"));
+    }
+}

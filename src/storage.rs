@@ -83,6 +83,35 @@ CREATE TABLE IF NOT EXISTS audit_events (
     at            INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_at ON audit_events(at);
+
+-- Per-key spend history: one row per (alias, hourly window). Enables
+-- historical budget-vs-actual charts without re-aggregating usage_events.
+CREATE TABLE IF NOT EXISTS key_spend_history (
+    alias         TEXT    NOT NULL,
+    window_start  INTEGER NOT NULL,
+    window_end    INTEGER NOT NULL,
+    requests      INTEGER NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    spend_micros  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (alias, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_key_spend_history_alias_start
+    ON key_spend_history(alias, window_start);
+
+-- Long-term metrics retention: downsampled rollups. Each row is a fixed
+-- window (1m/5m/1h) of aggregate counters, so the dashboard can plot
+-- "requests per second over the last 7 days" without an external TSDB.
+CREATE TABLE IF NOT EXISTS metric_rollups (
+    bucket        TEXT    NOT NULL,   -- "1m" | "5m" | "1h"
+    window_start  INTEGER NOT NULL,  -- unix seconds at the start of the window
+    name          TEXT    NOT NULL,
+    labels_json   TEXT    NOT NULL,
+    value         INTEGER NOT NULL,
+    PRIMARY KEY (bucket, window_start, name, labels_json)
+);
+CREATE INDEX IF NOT EXISTS idx_metric_rollups_bucket_start
+    ON metric_rollups(bucket, window_start);
 "#;
 
 /// A single in-memory snapshot of a key's counters.
@@ -161,6 +190,7 @@ impl Storage {
             soft_budget: None,
             allowed_model_region: None,
             blocked: false,
+            allowed_cidrs: vec![],
         };
         self.upsert_api_key(raw, &cfg)
     }
@@ -242,6 +272,7 @@ impl Storage {
                 soft_budget: None,
                 allowed_model_region: None,
                 blocked: false,
+                allowed_cidrs: vec![],
             });
             out.push((raw_hash, role, cfg));
         }
@@ -496,6 +527,156 @@ impl Storage {
         Ok(())
     }
 
+    /// Increment the per-key spend history bucket for the window containing `at`.
+    /// `window_seconds` defines the bucket size (e.g. 3600 for hourly). Each row
+    /// accumulates requests / tokens / spend for that window.
+    pub fn record_spend_history(
+        &self,
+        alias: &str,
+        at: i64,
+        window_seconds: i64,
+        delta_in: i64,
+        delta_out: i64,
+        delta_spend_usd: f64,
+        delta_requests: i64,
+    ) -> RouterResult<()> {
+        let window_start = (at / window_seconds) * window_seconds;
+        let window_end = window_start + window_seconds;
+        let micros = (delta_spend_usd * 1_000_000.0) as i64;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO key_spend_history (alias, window_start, window_end, requests, input_tokens, output_tokens, spend_micros) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(alias, window_start) DO UPDATE SET \
+               requests     = requests     + excluded.requests, \
+               input_tokens = input_tokens + excluded.input_tokens, \
+               output_tokens= output_tokens+ excluded.output_tokens, \
+               spend_micros = spend_micros + excluded.spend_micros",
+            params![
+                alias,
+                window_start,
+                window_end,
+                delta_requests,
+                delta_in,
+                delta_out,
+                micros
+            ],
+        )
+        .map_err(sqlite_err)?;
+        Ok(())
+    }
+
+    /// Most-recent spend-history rows for an alias, newest first.
+    pub fn spend_history(
+        &self,
+        alias: &str,
+        limit: u32,
+    ) -> RouterResult<Vec<KeySpendHistoryRow>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT window_start, window_end, requests, input_tokens, output_tokens, spend_micros \
+                 FROM key_spend_history WHERE alias = ?1 ORDER BY window_start DESC LIMIT ?2",
+            )
+            .map_err(sqlite_err)?;
+        let rows = stmt
+            .query_map(params![alias, limit as i64], |r| {
+                Ok(KeySpendHistoryRow {
+                    window_start: r.get(0)?,
+                    window_end: r.get(1)?,
+                    requests: r.get::<_, i64>(2)? as u64,
+                    input_tokens: r.get::<_, i64>(3)? as u64,
+                    output_tokens: r.get::<_, i64>(4)? as u64,
+                    spend_usd: (r.get::<_, i64>(5)? as f64) / 1_000_000.0,
+                })
+            })
+            .map_err(sqlite_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(sqlite_err)?);
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KeySpendHistoryRow {
+    pub window_start: i64,
+    pub window_end: i64,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub spend_usd: f64,
+}
+
+/// One downsampled metric rollup row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetricRollupRow {
+    pub bucket: String,
+    pub window_start: i64,
+    pub name: String,
+    pub labels_json: String,
+    pub value: i64,
+}
+
+impl Storage {
+    /// Upsert a downsampled rollup row (1m/5m/1h window of an aggregate counter).
+    pub fn record_rollup(
+        &self,
+        bucket: &str,
+        window_start: i64,
+        name: &str,
+        labels_json: &str,
+        value: i64,
+    ) -> RouterResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO metric_rollups (bucket, window_start, name, labels_json, value) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(bucket, window_start, name, labels_json) DO UPDATE SET value=excluded.value",
+            params![bucket, window_start, name, labels_json, value],
+        )
+        .map_err(sqlite_err)?;
+        Ok(())
+    }
+
+    /// Query rollups for a bucket within a time range, newest first.
+    pub fn rollups_in_range(
+        &self,
+        bucket: &str,
+        since_unix: i64,
+        until_unix: i64,
+        limit: u32,
+    ) -> RouterResult<Vec<MetricRollupRow>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT bucket, window_start, name, labels_json, value \
+                 FROM metric_rollups \
+                 WHERE bucket = ?1 AND window_start >= ?2 AND window_start < ?3 \
+                 ORDER BY window_start ASC LIMIT ?4",
+            )
+            .map_err(sqlite_err)?;
+        let rows = stmt
+            .query_map(params![bucket, since_unix, until_unix, limit as i64], |r| {
+                Ok(MetricRollupRow {
+                    bucket: r.get(0)?,
+                    window_start: r.get(1)?,
+                    name: r.get(2)?,
+                    labels_json: r.get(3)?,
+                    value: r.get(4)?,
+                })
+            })
+            .map_err(sqlite_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(sqlite_err)?);
+        }
+        Ok(out)
+    }
+}
+
+impl Storage {
     pub fn last_events(&self, limit: u32) -> RouterResult<Vec<UsageEventWithTime>> {
         let conn = self.conn.lock();
         let mut stmt = conn
